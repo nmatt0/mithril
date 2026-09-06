@@ -1,0 +1,22 @@
+{
+  "_comment": "Example mithril user rules. Run: mithril --secrets --rules examples/rules.example.json <tree>. See docs/user-rules.md.",
+
+  "path_rules": [
+    {"glob": "**/*.p12",        "category": "crypto",          "type": "pkcs12-keystore",  "description": "PKCS12 keystore (keys + certs)."},
+    {"glob": "**/*.jks",        "category": "crypto",          "type": "java-keystore",    "description": "Java keystore."},
+    {"glob": "**/.env",         "category": "config",          "type": "dotenv",           "description": "Environment/secrets file."},
+    {"glob": "**/nvram*",       "category": "config",          "type": "nvram-dump",       "description": "NVRAM dump (often holds device secrets)."}
+  ],
+
+  "content_rules": [
+    {"type": "vendor-admin-pw",   "category": "secret", "anchors": ["ADMIN_PASSWORD", "admin_pass"],
+     "regex": "[Aa]dmin_?[Pp]ass(?:word)?\\s*[=:]\\s*(\\S+)", "description": "Hardcoded vendor admin password."},
+
+    {"type": "wpa-psk",           "category": "secret", "anchors": ["wpa_psk", "psk="],
+     "regex": "psk\\s*=\\s*\"?([0-9A-Fa-f]{16,64}|\\S{8,63})", "min_entropy": 2.5,
+     "description": "Wi-Fi pre-shared key."},
+
+    {"type": "internal-endpoint", "category": "config", "anchors": ["update.corp.local", ".internal:"],
+     "description": "Reference to an internal endpoint."}
+  ]
+}
