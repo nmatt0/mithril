@@ -70,6 +70,28 @@ int run_argv(const std::vector<std::string>& args) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+// True if `cmd` is an executable on $PATH. The networked actions shell out to
+// curl (and update-db to unzip); preflighting here lets a missing program fail
+// with a precise "not found" message instead of run_argv's exit code 127
+// surfacing as the generic "curl failed (is the network reachable?)".
+bool command_on_path(const std::string& cmd) {
+    const char* path = std::getenv("PATH");
+    if (!path || !*path) return false;
+    std::string_view p(path);
+    size_t start = 0;
+    while (start <= p.size()) {
+        size_t colon = p.find(':', start);
+        size_t len = (colon == std::string_view::npos ? p.size() : colon) - start;
+        std::string dir(p.substr(start, len));
+        start = (colon == std::string_view::npos) ? p.size() + 1 : colon + 1;
+        if (dir.empty()) continue;
+        std::error_code ec;
+        fs::path cand = fs::path(dir) / cmd;  // follows symlinks (curl is often one)
+        if (fs::is_regular_file(cand, ec) && ::access(cand.c_str(), X_OK) == 0) return true;
+    }
+    return false;
+}
+
 std::string base_eco(const std::string& full) {
     size_t colon = full.find(':');
     return colon == std::string::npos ? full : full.substr(0, colon);
@@ -559,6 +581,10 @@ std::map<std::string, std::string> parse_sha256sums(const std::string& body) {
 }  // namespace
 
 int cve_fetch(std::string& err) {
+    if (!command_on_path("curl")) {
+        err = "curl not found on PATH; mithril --fetch-db needs curl";
+        return 1;
+    }
     const std::string data_dir = mithril_data_dir();
     std::error_code ec;
     fs::create_directories(data_dir, ec);
@@ -658,6 +684,13 @@ int cve_fetch(std::string& err) {
 }
 
 int cve_update(std::string& err) {
+    for (const char* tool : {"curl", "unzip"}) {
+        if (!command_on_path(tool)) {
+            err = std::string(tool) +
+                  " not found on PATH; mithril --update-db needs curl and unzip";
+            return 1;
+        }
+    }
     if (int rc = osv_update(err)) return rc;
     if (int rc = nvd_update(err)) return rc;
     if (int rc = kev_update(err)) return rc;

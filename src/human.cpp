@@ -303,11 +303,17 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
     if (!rep.errors.empty()) {
         o += "\n";
         for (const auto& e : rep.errors) {
+            // File-scoped errors carry a path and render as "unreadable <path>";
+            // scan-level errors (empty path, e.g. a missing CVE DB) render as a
+            // plain "error" line.
             o += "  ";
             o += a.yellow();
-            o += "unreadable";
+            o += e.first.empty() ? "error" : "unreadable";
             o += a.reset();
-            o += "  " + e.first + "  (" + e.second + ")\n";
+            if (e.first.empty())
+                o += "  (" + e.second + ")\n";
+            else
+                o += "  " + e.first + "  (" + e.second + ")\n";
         }
     }
 

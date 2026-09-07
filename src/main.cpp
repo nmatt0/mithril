@@ -52,7 +52,7 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --licenses      Identify open-source licenses\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
                  "      --rules <FILE>  Add user-defined rules from a JSON file\n"
-                 "      --fetch-db      Download a prebuilt CVE mirror (fast), then exit\n"
+                 "      --fetch-db      Download a prebuilt CVE mirror, then exit\n"
                  "      --update-db     Rebuild the local CVE mirror from source, then exit\n"
                  "  -C, --outdir <DIR>  Write the JSON report to DIR/mithril-report.json\n"
                  "      --threads <N>   Worker threads for tree scans (default: auto)\n"
@@ -192,12 +192,22 @@ int main(int argc, char** argv) {
     // CVE join (downstream of the SBOM): match components against the local
     // mirror. OSV covers package-DB components (dpkg/apk); the NVD augment covers
     // the CPE-bearing binary-version components.
+    bool cve_db_missing = false;
     if (impl.cve) {
         OsvIndex osv;
         bool have_osv = osv.open(osv_index_path());
         auto nvd = load_nvd_db(nvd_index_path());
         if (!have_osv && !nvd) {
-            std::fprintf(stderr, "cve: no local vuln DB (run '%s --update-db' first)\n", prog);
+            // The CVE pass cannot run without the local mirror. Make this loud: a
+            // scan-level entry in errors[] (empty path == not file-scoped) and a
+            // nonzero exit, so a script or agent never mistakes "DB absent" for
+            // "target is clean". Point at --fetch-db (the prebuilt mirror);
+            // --update-db is the power-user rebuild.
+            cve_db_missing = true;
+            std::string msg =
+                std::string("cve: no local vuln DB; run '") + prog + " --fetch-db' first";
+            rep.errors.emplace_back(std::string(), msg);
+            std::fprintf(stderr, "%s: %s\n", prog, msg.c_str());
         } else {
             // Release precision applies where the image's VERSION_ID aligns with
             // the OSV release tag: Debian ("11") and Ubuntu ("20.04"). rpm distros
@@ -277,5 +287,7 @@ int main(int argc, char** argv) {
         std::fwrite(h.data(), 1, h.size(), stdout);
     }
 
-    return 0;
+    // A requested CVE pass with no local mirror is a real failure, not a clean
+    // scan: exit nonzero so callers notice even when parsing only the exit code.
+    return cve_db_missing ? 1 : 0;
 }
