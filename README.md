@@ -23,22 +23,15 @@ It has no build-time dependency on moria. Point it at any file or directory.
 - **Fully offline and reproducible.** No network at scan time; the CVE mirror is refreshed by an explicit, separate step. Air-gappable.
 - **Safe on hostile input.** Untrusted bytes go through one bounds-checked reader. Parsers degrade to a clean error rather than crash, and the CVE index is memory-mapped so a scan never parses the whole thing.
 
-## Build
+## Build & Install
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-```
-
-No third-party libraries. Debug with sanitizers: `cmake -S . -B build -DMT_SANITIZE=ON`.
-
-## Install
-
-```
 cmake --install build --prefix ~/.local     # or /usr/local (needs sudo)
 ```
 
-Installs the `mithril` binary. A bare `cp build/mithril ~/.local/bin` works too.
+No third-party libraries. The install step places the `mithril` binary; a bare `cp build/mithril ~/.local/bin` works just as well. Debug with sanitizers: `cmake -S . -B build -DMT_SANITIZE=ON`.
 
 ## Usage
 
@@ -52,10 +45,12 @@ mithril --sbom -C out/ <dir>  # SBOM only -> out/sbom.cdx.json + out/sbom.spdx.j
 mithril --cve <dir>           # match components against the local mirror (offline)
 mithril --licenses <dir>      # licenses only
 mithril --rules my.json <dir> # add user-defined rules (docs/user-rules.md)
-mithril --fetch-db            # download a prebuilt CVE mirror (a networked command)
+mithril --fetch-db            # FIRST RUN: download the CVE mirror (a networked command)
 mithril --update-db           # rebuild the CVE mirror from source (a networked command)
 mithril --help
 ```
+
+**First run:** the `--cve` pass needs a local vulnerability mirror, so run **`mithril --fetch-db`** once before your first CVE scan (details under [The CVE mirror](#the-cve-mirror)). Without it, `--cve` reports the missing DB and exits nonzero. Secrets, SBOM, and licenses are fully offline and need no setup.
 
 Naming any of `--secrets` / `--sbom` / `--cve` / `--licenses` runs just those. Naming none runs all four.
 
@@ -63,7 +58,7 @@ Naming any of `--secrets` / `--sbom` / `--cve` / `--licenses` runs just those. N
 
 `--cve` reads a local mirror under `~/.local/share/mithril/` (honors `$MITHRIL_DB`), a compact, memory-mapped index built from OSV.dev, the NVD 2.0 API, the CISA KEV catalog, and FIRST's EPSS scores that a scan loads in a fraction of a second. Get it two ways, and only these two commands ever touch the network:
 
-- **`mithril --fetch-db`** downloads a prebuilt index (rebuilt daily) and verifies every file against a published SHA-256 before installing. It does no upstream scraping: it just fetches the finished index. Needs `curl`. Point it at a mirror with `$MITHRIL_DB_URL`.
+- **`mithril --fetch-db`** downloads a prebuilt index (rebuilt weekly) and verifies every file against a published SHA-256 before installing. It does no upstream scraping: it just fetches the finished index. Needs `curl`. Point it at a mirror with `$MITHRIL_DB_URL`.
 - **`mithril --update-db`** rebuilds the index from the upstream feeds yourself. Slower, needs `curl` and `unzip`, and is the authoritative path if you want to control exactly what goes in. Set `$NVD_API_KEY` to raise the NVD rate limit (optional; it works without one, just slower).
 
 Build it once either way; every scan after that is offline. See `docs/cve-join.md` and `docs/cve-index-format.md`.

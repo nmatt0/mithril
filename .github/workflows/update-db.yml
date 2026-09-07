@@ -67,7 +67,7 @@ jobs:
           name: "Vulnerability index (rolling)"
           body: |
             Prebuilt offline vulnerability index for `mithril --fetch-db`
-            (OSV + NVD/CPE + CISA KEV + EPSS). Rebuilt daily from the upstream
+            (OSV + NVD/CPE + CISA KEV + EPSS). Rebuilt weekly from the upstream
             feeds. Each asset is checksummed in `SHA256SUMS`; `--fetch-db`
             verifies before installing. This release is intentionally not marked
             "Latest" so the versioned binary release keeps that badge.
