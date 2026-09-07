@@ -15,6 +15,7 @@
 #include "credstore.hpp"
 #include "cve.hpp"
 #include "osvindex.hpp"
+#include "sha256.hpp"
 #include "engine.hpp"
 #include "entropy.hpp"
 #include "filever.hpp"
@@ -963,6 +964,33 @@ static void test_license() {
     CHECK(lic_scan("src/foo.c", "Redistribution and use in source and binary forms").empty());
 }
 
+// ---------------------------------------------------------------- sha256
+// FIPS 180-4 / NIST known-answer vectors. --fetch-db relies on this to verify a
+// downloaded index, so a wrong digest must be caught here.
+static void test_sha256() {
+    using ft::sha256_hex;
+    CHECK(sha256_hex(std::string("")) ==
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    CHECK(sha256_hex(std::string("abc")) ==
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(sha256_hex(std::string(
+              "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
+          "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    // A million 'a' bytes -> exercises multi-block + length padding.
+    std::string million(1000000, 'a');
+    CHECK(sha256_hex(million) ==
+          "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    // Padding-boundary vectors: 55 bytes is the largest that pads within one
+    // block (55+1+8=64); 56 bytes forces the length into a second block; 64 is a
+    // full block with all padding in the next.
+    CHECK(sha256_hex(std::string(55, 'a')) ==
+          "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+    CHECK(sha256_hex(std::string(56, 'a')) ==
+          "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+    CHECK(sha256_hex(std::string(64, 'x')) ==
+          "7ce100971f64e7001e8fe5a51973ecdfe1ced42befe7ee8d5fd6219506b5393c");
+}
+
 int main() {
     test_ahocorasick();
     test_entropy();
@@ -996,6 +1024,7 @@ int main() {
     test_langmanifest();
     test_license();
     test_sbom_emit();
+    test_sha256();
     std::printf("unit: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

@@ -1,0 +1,54 @@
+name: release
+
+# Build a prebuilt binary on every version tag (e.g. `git tag v0.1.0 && git push
+# --tags`) and attach it to the GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write        # needed to create/update the Release
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ python3
+
+      - name: Configure and build (Release)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: Test gate
+        run: |
+          ./build/mithril_unit
+          python3 tests/test_secrets.py ./build/mithril
+          python3 tests/test_sbom.py ./build/mithril
+          python3 tests/test_cve.py ./build/mithril
+          python3 tests/test_licenses.py ./build/mithril
+          python3 tests/test_kconfig.py ./build/mithril
+
+      - name: Package
+        run: |
+          pkg="mithril-${GITHUB_REF_NAME}-linux-x86_64"
+          # mithril has zero third-party dependencies, so the release is just the
+          # self-contained binary plus the license and readme. The vulnerability
+          # index is distributed separately (see the update-db workflow); fetch it
+          # after install with `mithril --fetch-db`.
+          mkdir -p "dist/${pkg}"
+          cp build/mithril LICENSE README.md "dist/${pkg}/"
+          tar -C dist -czf "${pkg}.tar.gz" "${pkg}"
+          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+
+      - name: Attach to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mithril-*-linux-x86_64.tar.gz
+            mithril-*-linux-x86_64.tar.gz.sha256

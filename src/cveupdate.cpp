@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +21,7 @@
 #include "io_util.hpp"
 #include "jsonparse.hpp"
 #include "osvindex.hpp"
+#include "sha256.hpp"
 #include "strutil.hpp"
 
 namespace ft {
@@ -493,6 +496,151 @@ int epss_update(std::string& err) {
     std::fwrite(out.data(), 1, out.size(), f);
     std::fclose(f);
     std::fprintf(stderr, "wrote %s (%zu EPSS scores)\n", epss_index_path().c_str(), n);
+    return 0;
+}
+
+namespace {
+
+// Default location of the prebuilt index (a rolling GitHub release updated by
+// the update-db CI workflow). Overridable via $MITHRIL_DB_URL for a fork/mirror
+// or an internal cache. No trailing slash.
+std::string db_base_url() {
+    if (const char* u = std::getenv("MITHRIL_DB_URL"); u && *u) {
+        std::string s = u;
+        if (!s.empty() && s.back() == '/') s.pop_back();
+        return s;
+    }
+    return "https://github.com/nmatt0/mithril/releases/download/db-latest";
+}
+
+// One prebuilt asset: the served filename, the final path in the data dir, and
+// whether the served file is gzip-compressed (inflated in-process on install).
+struct Asset {
+    std::string served;              // filename in the release + in SHA256SUMS
+    std::string dest;                // final path in the data dir
+    bool gz;                         // served as .gz -> inflate before install
+};
+
+// Parse a coreutils-style SHA256SUMS body ("<hex>  <name>" per line) into a
+// name -> lowercase-hex map. The " *name" (binary) marker is tolerated.
+std::map<std::string, std::string> parse_sha256sums(const std::string& body) {
+    std::map<std::string, std::string> m;
+    size_t start = 0;
+    while (start < body.size()) {
+        size_t nl = body.find('\n', start);
+        std::string line = body.substr(start, (nl == std::string::npos ? body.size() : nl) - start);
+        start = (nl == std::string::npos) ? body.size() : nl + 1;
+        size_t sp = line.find(' ');
+        if (sp != 64) continue;  // first token must be a 64-char hex digest
+        std::string hash = line.substr(0, 64);
+        size_t name_at = line.find_first_not_of(" *", sp);
+        if (name_at == std::string::npos) continue;
+        std::string name = line.substr(name_at);
+        while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+        for (char& c : hash) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        m[name] = hash;
+    }
+    return m;
+}
+
+}  // namespace
+
+int cve_fetch(std::string& err) {
+    const std::string data_dir = mithril_data_dir();
+    std::error_code ec;
+    fs::create_directories(data_dir, ec);
+    if (ec) {
+        err = "cannot create data dir: " + data_dir;
+        return 1;
+    }
+    const std::string base = db_base_url();
+    const std::string tmp = data_dir + "/fetch-tmp";
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp, ec);
+
+    // Integrity manifest first: every asset is verified against it before install.
+    const std::string sums_path = tmp + "/SHA256SUMS";
+    std::fprintf(stderr, "fetching SHA256SUMS from %s ...\n", base.c_str());
+    if (run_argv({"curl", "-sSL", "--fail", "-o", sums_path, base + "/SHA256SUMS"}) != 0) {
+        err = "curl failed for SHA256SUMS (is the network reachable? is the db-latest "
+              "release published?)";
+        fs::remove_all(tmp, ec);
+        return 1;
+    }
+    auto sums = parse_sha256sums(read_file(sums_path).value_or(std::string()));
+    if (sums.empty()) {
+        err = "SHA256SUMS is empty or unparseable";
+        fs::remove_all(tmp, ec);
+        return 1;
+    }
+
+    const std::vector<Asset> assets = {
+        {"osv-index.mdb.gz", osv_index_path(), true},
+        {"nvd-index.json", nvd_index_path(), false},
+        {"kev.json", kev_index_path(), false},
+        {"epss.txt.gz", epss_index_path(), true},
+    };
+
+    for (const Asset& a : assets) {
+        auto it = sums.find(a.served);
+        if (it == sums.end()) {
+            err = a.served + " is not listed in SHA256SUMS";
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+        const std::string dl = tmp + "/" + a.served;
+        std::fprintf(stderr, "fetching %s ...\n", a.served.c_str());
+        if (run_argv({"curl", "-sSL", "--fail", "-o", dl, base + "/" + a.served}) != 0) {
+            err = "curl failed for " + a.served;
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+        std::string bytes = read_file(dl).value_or(std::string());
+        std::string got = sha256_hex(bytes);
+        if (got != it->second) {
+            err = "checksum mismatch for " + a.served + " (expected " + it->second + ", got " +
+                  got + ") -- download corrupt or tampered";
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+
+        // Install atomically: write final content to a temp path in the data dir
+        // (same filesystem as the destination), then rename over the old file.
+        const std::string staged = a.dest + ".new";
+        std::string content;
+        if (a.gz) {
+            auto inflated = gzip_inflate(
+                std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(bytes.data()),
+                                         bytes.size()),
+                1024u << 20);  // 1 GiB cap: the osv index can be a few hundred MB
+            if (!inflated) {
+                err = "gzip inflate failed for " + a.served;
+                fs::remove_all(tmp, ec);
+                return 1;
+            }
+            content.assign(reinterpret_cast<const char*>(inflated->data()), inflated->size());
+        } else {
+            content = std::move(bytes);
+        }
+        std::FILE* f = std::fopen(staged.c_str(), "wb");
+        if (!f) {
+            err = "cannot write " + staged;
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+        std::fwrite(content.data(), 1, content.size(), f);
+        std::fclose(f);
+        fs::rename(staged, a.dest, ec);
+        if (ec) {
+            err = "cannot install " + a.dest + ": " + ec.message();
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+        std::fprintf(stderr, "  installed %s (%zu bytes)\n", a.dest.c_str(), content.size());
+    }
+
+    fs::remove_all(tmp, ec);
+    std::fprintf(stderr, "fetched prebuilt vulnerability index into %s\n", data_dir.c_str());
     return 0;
 }
 

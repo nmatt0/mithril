@@ -1,0 +1,80 @@
+name: update-db
+
+# Rebuild the offline vulnerability index from source (OSV + NVD + KEV + EPSS)
+# and publish it as a rolling `db-latest` GitHub Release, so clients can install
+# it with `mithril --fetch-db` instead of scraping the upstream feeds themselves.
+# `mithril --update-db` remains the authoritative rebuild path; this just runs it
+# on a schedule and packages the result.
+on:
+  schedule:
+    - cron: "17 5 * * *"    # daily, 05:17 UTC
+  workflow_dispatch: {}      # allow a manual run from the Actions tab
+
+permissions:
+  contents: write            # create/update the db-latest release
+
+concurrency:
+  group: update-db
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free some disk (the OSV archives are large when extracted)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ curl unzip
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: Rebuild the index from source
+        env:
+          # Keep the working data off the small root volume.
+          MITHRIL_DB: ${{ runner.temp }}/mithril-db
+        # NVD's public API is rate-limited (and sometimes blocks cloud IPs); if
+        # this step flakes, re-run the workflow. A future improvement is to pass
+        # an NVD_API_KEY through to raise the limit.
+        run: ./build/mithril --update-db
+
+      - name: Package the release assets
+        env:
+          MITHRIL_DB: ${{ runner.temp }}/mithril-db
+        run: |
+          mkdir -p dist
+          gzip -c "$MITHRIL_DB/osv-index.mdb" > dist/osv-index.mdb.gz
+          gzip -c "$MITHRIL_DB/epss.txt"      > dist/epss.txt.gz
+          cp "$MITHRIL_DB/nvd-index.json" dist/nvd-index.json
+          cp "$MITHRIL_DB/kev.json"       dist/kev.json
+          ( cd dist && sha256sum osv-index.mdb.gz nvd-index.json kev.json epss.txt.gz > SHA256SUMS )
+          echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/BUILD_INFO.txt
+          ls -la dist
+
+      - name: Publish to the rolling db-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: db-latest
+          name: "Vulnerability index (rolling)"
+          body: |
+            Prebuilt offline vulnerability index for `mithril --fetch-db`
+            (OSV + NVD/CPE + CISA KEV + EPSS). Rebuilt daily from the upstream
+            feeds. Each asset is checksummed in `SHA256SUMS`; `--fetch-db`
+            verifies before installing. This release is intentionally not marked
+            "Latest" so the versioned binary release keeps that badge.
+          make_latest: false
+          files: |
+            dist/osv-index.mdb.gz
+            dist/nvd-index.json
+            dist/kev.json
+            dist/epss.txt.gz
+            dist/SHA256SUMS
+            dist/BUILD_INFO.txt

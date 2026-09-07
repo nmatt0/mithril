@@ -38,6 +38,7 @@ add_executable(mithril
   src/cve.cpp
   src/osvindex.cpp
   src/cveupdate.cpp
+  src/sha256.cpp
   src/license.cpp
   src/sbom.cpp
   src/sbom_emit.cpp
@@ -71,6 +72,7 @@ add_executable(mithril_unit
   src/dbpath.cpp
   src/cve.cpp
   src/osvindex.cpp
+  src/sha256.cpp
   src/license.cpp
   src/sbom.cpp
   src/sbom_emit.cpp

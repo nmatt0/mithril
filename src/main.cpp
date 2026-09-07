@@ -52,7 +52,8 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --licenses      Identify open-source licenses\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
                  "      --rules <FILE>  Add user-defined rules from a JSON file\n"
-                 "      --update-db     Download/refresh the local CVE mirror, then exit\n"
+                 "      --fetch-db      Download a prebuilt CVE mirror (fast), then exit\n"
+                 "      --update-db     Rebuild the local CVE mirror from source, then exit\n"
                  "  -C, --outdir <DIR>  Write the JSON report to DIR/mithril-report.json\n"
                  "      --threads <N>   Worker threads for tree scans (default: auto)\n"
                  "  -h, --help          Print help\n"
@@ -79,6 +80,7 @@ int main(int argc, char** argv) {
     unsigned threads = 0;  // 0 -> auto
     bool json_out = false;
     bool update_db = false;
+    bool fetch_db = false;
     Passes passes;
     bool have_path = false;
     bool end_of_opts = false;
@@ -117,6 +119,8 @@ int main(int argc, char** argv) {
             outdir_cli = argv[++i];
         } else if (!end_of_opts && std::strcmp(a, "--update-db") == 0) {
             update_db = true;
+        } else if (!end_of_opts && std::strcmp(a, "--fetch-db") == 0) {
+            fetch_db = true;
         } else if (!end_of_opts && std::strcmp(a, "--rules") == 0 && i + 1 < argc) {
             rules_cli = argv[++i];
         } else if (!end_of_opts && std::strcmp(a, "--threads") == 0 && i + 1 < argc) {
@@ -133,12 +137,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --update-db is a standalone action (the only networked path); no scan target.
-    if (update_db) {
+    // --fetch-db / --update-db are standalone actions (the only networked paths);
+    // no scan target. --fetch-db downloads a prebuilt index; --update-db rebuilds
+    // it from source. If both are given, the authoritative rebuild wins.
+    if (update_db || fetch_db) {
         std::string err;
-        int rc = cve_update(err);
+        const char* action = update_db ? "--update-db" : "--fetch-db";
+        int rc = update_db ? cve_update(err) : cve_fetch(err);
         if (rc != 0) {
-            std::fprintf(stderr, "%s: --update-db: %s\n", prog, err.c_str());
+            std::fprintf(stderr, "%s: %s: %s\n", prog, action, err.c_str());
             return 1;
         }
         return 0;
