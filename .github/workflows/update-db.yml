@@ -41,9 +41,10 @@ jobs:
         env:
           # Keep the working data off the small root volume.
           MITHRIL_DB: ${{ runner.temp }}/mithril-db
-        # NVD's public API is rate-limited (and sometimes blocks cloud IPs); if
-        # this step flakes, re-run the workflow. A future improvement is to pass
-        # an NVD_API_KEY through to raise the limit.
+          # Raises the NVD rate limit from 5 to ~50 req/30s and helps against
+          # cloud-IP throttling. Optional: the step still works unauthenticated
+          # if the secret is unset (just slower).
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: ./build/mithril --update-db
 
       - name: Package the release assets

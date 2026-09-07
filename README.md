@@ -64,7 +64,7 @@ Naming any of `--secrets` / `--sbom` / `--cve` / `--licenses` runs just those. N
 `--cve` reads a local mirror under `~/.local/share/mithril/` (honors `$MITHRIL_DB`), a compact, memory-mapped index built from OSV.dev, the NVD 2.0 API, the CISA KEV catalog, and FIRST's EPSS scores that a scan loads in a fraction of a second. Get it two ways, and only these two commands ever touch the network:
 
 - **`mithril --fetch-db`** downloads a prebuilt index (rebuilt daily) and verifies every file against a published SHA-256 before installing. This is the fast path: no upstream scraping, a few seconds. Point it at a mirror with `$MITHRIL_DB_URL`.
-- **`mithril --update-db`** rebuilds the index from the upstream feeds yourself. Slower, needs `curl` and `unzip`, and is the authoritative path if you want to control exactly what goes in.
+- **`mithril --update-db`** rebuilds the index from the upstream feeds yourself. Slower, needs `curl` and `unzip`, and is the authoritative path if you want to control exactly what goes in. Set `$NVD_API_KEY` to raise the NVD rate limit (optional; it works without one, just slower).
 
 Build it once either way; every scan after that is offline. See `docs/cve-join.md` and `docs/cve-index-format.md`.
 

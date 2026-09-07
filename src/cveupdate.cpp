@@ -311,6 +311,14 @@ int nvd_update(std::string& err) {
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
 
+    // An NVD API key (env NVD_API_KEY) raises the rate limit from 5 to ~50
+    // requests per rolling 30s, sent as the apiKey header; without it we stay
+    // unauthenticated (slower, but still works). Shrink the polite pause when a
+    // key is present. The key is never logged.
+    const char* nvd_key_env = std::getenv("NVD_API_KEY");
+    const std::string nvd_key = nvd_key_env ? nvd_key_env : "";
+    const unsigned nvd_sleep = nvd_key.empty() ? 6u : 1u;
+
     std::vector<NvdEntry> entries;
     // Every CPE (vendor, product) the tool can emit: binver banners + filename libc.
     auto products = binver_cpe_products();
@@ -325,9 +333,15 @@ int nvd_update(std::string& err) {
         std::string vms = "virtualMatchString=cpe:2.3:a:" + vendor + ":" + product;
         std::string outfile = tmp + "/" + vendor + "_" + product + ".json";
         std::fprintf(stderr, "querying NVD for %s:%s ...\n", vendor.c_str(), product.c_str());
-        int rc = run_argv({"curl", "-sS", "--fail", "--get",
-                          "https://services.nvd.nist.gov/rest/json/cves/2.0", "--data-urlencode",
-                          vms, "--data-urlencode", "resultsPerPage=2000", "-o", outfile});
+        std::vector<std::string> curl_args = {
+            "curl", "-sS", "--fail", "--get",
+            "https://services.nvd.nist.gov/rest/json/cves/2.0", "--data-urlencode", vms,
+            "--data-urlencode", "resultsPerPage=2000", "-o", outfile};
+        if (!nvd_key.empty()) {
+            curl_args.push_back("-H");
+            curl_args.push_back("apiKey: " + nvd_key);
+        }
+        int rc = run_argv(curl_args);
         if (rc != 0) {
             err = "curl failed for NVD " + product + " (rc=" + std::to_string(rc) + ")";
             return 1;
@@ -349,8 +363,7 @@ int nvd_update(std::string& err) {
             std::fprintf(stderr, "  %s:%s: %zu cpeMatch entries\n", vendor.c_str(), product.c_str(),
                          entries.size() - before);
         }
-        // NVD rate limit without an API key is 5 requests / 30s; be polite.
-        if (i + 1 < products.size()) ::sleep(6);
+        if (i + 1 < products.size()) ::sleep(nvd_sleep);
     }
 
     std::string out = "{\"schema\":1,\"source\":\"nvd.nist.gov API 2.0\",\"generated\":\"";
