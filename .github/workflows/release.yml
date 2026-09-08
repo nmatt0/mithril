@@ -1,7 +1,11 @@
 name: release
 
-# Build a prebuilt binary on every version tag (e.g. `git tag v0.1.0 && git push
-# --tags`) and attach it to the GitHub Release.
+# Build prebuilt binaries on every version tag (e.g. `git tag v0.1.0 && git push
+# --tags`) and attach one self-contained tarball per platform to the GitHub
+# Release. mithril has zero third-party dependencies, so each tarball is just the
+# binary plus the license and readme. The vulnerability index is distributed
+# separately (see the update-db workflow); fetch it after install with
+# `mithril --fetch-db`.
 on:
   push:
     tags: ["v*"]
@@ -10,15 +14,36 @@ permissions:
   contents: write        # needed to create/update the Release
 
 jobs:
-  linux-x86_64:
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            installer: apt
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            installer: apt
+          - name: macos-arm64
+            runner: macos-latest
+            installer: brew
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      # mithril is stdlib-only C++20: just a compiler, CMake, and python3 for the
+      # test gate. No compression or other libraries.
+      - name: Install build dependencies (apt)
+        if: matrix.installer == 'apt'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ python3
+
+      - name: Install build dependencies (brew)
+        if: matrix.installer == 'brew'
+        run: brew install cmake   # python3 ships on the macOS runner
 
       - name: Configure and build (Release)
         run: |
@@ -33,22 +58,24 @@ jobs:
           python3 tests/test_cve.py ./build/mithril
           python3 tests/test_licenses.py ./build/mithril
           python3 tests/test_kconfig.py ./build/mithril
+          python3 tests/test_kconfig_recovery.py ./build/mithril
 
       - name: Package
         run: |
-          pkg="mithril-${GITHUB_REF_NAME}-linux-x86_64"
-          # mithril has zero third-party dependencies, so the release is just the
-          # self-contained binary plus the license and readme. The vulnerability
-          # index is distributed separately (see the update-db workflow); fetch it
-          # after install with `mithril --fetch-db`.
+          pkg="mithril-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir -p "dist/${pkg}"
           cp build/mithril LICENSE README.md "dist/${pkg}/"
           tar -C dist -czf "${pkg}.tar.gz" "${pkg}"
-          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          # sha256sum on Linux, shasum on macOS.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          else
+            shasum -a 256 "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+          fi
 
       - name: Attach to the Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            mithril-*-linux-x86_64.tar.gz
-            mithril-*-linux-x86_64.tar.gz.sha256
+            mithril-*-${{ matrix.name }}.tar.gz
+            mithril-*-${{ matrix.name }}.tar.gz.sha256
