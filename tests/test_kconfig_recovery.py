@@ -42,8 +42,8 @@ def make_config():
     return b"\n".join(lines) + b"\n"
 
 
-def kernel_cves(binary, root):
-    out = subprocess.check_output([binary, "-j", "--cve", root], stderr=subprocess.DEVNULL)
+def kernel_cves(binary, root, env):
+    out = subprocess.check_output([binary, "-j", "--cve", root], stderr=subprocess.DEVNULL, env=env)
     return {k["cve"]: k for k in json.loads(out).get("kernel_cves", [])}
 
 
@@ -54,6 +54,15 @@ def main():
         return 1
     fails = 0
 
+    # The kernel-config gating is independent of the OSV/NVD mirror, but `--cve`
+    # exits nonzero when no local DB is present. Point MITHRIL_DB at a minimal
+    # fixture (an empty NVD index is enough to satisfy the presence check) so the
+    # test does not depend on a downloaded mirror.
+    dbroot = tempfile.mkdtemp(prefix="mithril-kcfg-db-")
+    with open(os.path.join(dbroot, "nvd-index.json"), "w") as f:
+        f.write("{}")
+    env = dict(os.environ, MITHRIL_DB=dbroot)
+
     # --- Case 1: on-disk .config recovered, authoritative gating ---
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, "boot"))
@@ -62,7 +71,7 @@ def main():
             f.write(BANNER + os.urandom(4096))
         with open(os.path.join(d, "etc", "kernel.config"), "wb") as f:
             f.write(make_config())
-        out = subprocess.check_output([binary, "-j", "--cve", d], stderr=subprocess.DEVNULL)
+        out = subprocess.check_output([binary, "-j", "--cve", d], stderr=subprocess.DEVNULL, env=env)
         rep = json.loads(out)
         kc = {k["cve"]: k for k in rep.get("kernel_cves", [])}
         # af_packet double-free needs CONFIG_PACKET (=y) -> applicable
@@ -94,7 +103,7 @@ def main():
             print(f"FAIL(1): hardening tri-state wrong: {hb}")
             fails += 1
         # --dump-kconfig prints the verbatim config; a config-less tree exits nonzero
-        dumped = subprocess.run([binary, "--dump-kconfig", d], capture_output=True)
+        dumped = subprocess.run([binary, "--dump-kconfig", d], capture_output=True, env=env)
         if dumped.returncode != 0 or b"CONFIG_PACKET=y" not in dumped.stdout:
             print(f"FAIL(1): --dump-kconfig did not emit the recovered config (rc={dumped.returncode})")
             fails += 1
@@ -107,7 +116,7 @@ def main():
             f.write(BANNER + os.urandom(4096))
         with open(os.path.join(moddir, "mac80211.ko"), "wb") as f:
             f.write(b"\x7fELF" + os.urandom(2048))  # content irrelevant; path is the signal
-        kc = kernel_cves(binary, d)
+        kc = kernel_cves(binary, d, env)
         # mac80211 MBSSID UAF needs CONFIG_MAC80211 (5.1..6.1) -> applicable via the .ko
         mb = kc.get("CVE-2022-42719")
         if not mb or mb["state"] != "applicable":
@@ -119,7 +128,7 @@ def main():
             print(f"FAIL(2): CVE-2022-0435 expected undetermined, got {tp}")
             fails += 1
         # No verbatim .config here -> --dump-kconfig must exit nonzero.
-        dumped = subprocess.run([binary, "--dump-kconfig", d], capture_output=True)
+        dumped = subprocess.run([binary, "--dump-kconfig", d], capture_output=True, env=env)
         if dumped.returncode == 0:
             print("FAIL(2): --dump-kconfig should fail when no .config was recovered")
             fails += 1
