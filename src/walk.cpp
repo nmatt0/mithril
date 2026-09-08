@@ -14,7 +14,9 @@
 #include "engine.hpp"
 #include "file_map.hpp"
 #include "filever.hpp"
+#include "kallsyms.hpp"
 #include "kconfig.hpp"
+#include "kconfig_infer.hpp"
 #include "langmanifest.hpp"
 #include "license.hpp"
 #include "reader.hpp"
@@ -39,7 +41,8 @@ struct FileHits {
     std::vector<Finding> licenses;
     std::string distro_id, distro_version;  // parsed if this file is os-release
     bool has_kconfig = false;
-    std::set<std::string> kconfig_enabled;
+    KernelConfigView kcv;  // per-file config knowledge (merged into the report)
+    std::string kconfig_text, kconfig_source;  // verbatim recovered .config, if any
 };
 
 // Parse an os-release file for ID and VERSION_ID (quotes stripped).
@@ -116,7 +119,40 @@ FileHits scan_one(const fs::path& path, const fs::path& root, const Passes& pass
         if (auto cfg = extract_kconfig(fm.span())) {  // embedded kernel .config (IKCONFIG)
             fh.notable.push_back(kconfig_finding(*cfg));
             fh.has_kconfig = true;
-            fh.kconfig_enabled = kconfig_enabled_options(*cfg);
+            infer_from_kconfig_text(*cfg, fh.kcv);
+            fh.kconfig_text = *cfg;
+            fh.kconfig_source = "ikconfig";
+        }
+    }
+
+    // Kernel-config inference (feeds the curated kernel-CVE checklist). Runs for
+    // the SBOM or CVE passes. Sources beyond IKCONFIG (handled above): an on-disk
+    // .config, /lib/modules manifests and .ko files, and — for a kernel image —
+    // the decoded kallsyms table plus distinctive strings.
+    if (passes.sbom || passes.cve) {
+        std::string_view p = fh.path;
+        auto ends = [&](std::string_view s) {
+            return p.size() >= s.size() && p.compare(p.size() - s.size(), s.size(), s) == 0;
+        };
+        if (!fh.has_kconfig && looks_like_kconfig(fm.span())) {
+            std::string cfg(reinterpret_cast<const char*>(fm.span().data()), fm.span().size());
+            infer_from_kconfig_text(cfg, fh.kcv);
+            fh.has_kconfig = true;
+            fh.kconfig_text = std::move(cfg);
+            fh.kconfig_source = "on-disk .config";
+        }
+        if (ends("modules.builtin"))
+            infer_from_modules_builtin(fm.span(), fh.kcv);
+        if (ends(".ko") || ends(".ko.gz") || ends(".ko.xz"))
+            infer_from_ko_path(fh.path, fh.kcv);
+        // A kernel image carries a "Linux version" banner. Decode its kallsyms
+        // and scan its strings. Bounded to keep tree scans fast.
+        if (fm.size() < (64u << 20)) {
+            auto kv = scan_kernel_version(fm.span(), fh.path);
+            if (!kv.empty()) {
+                if (auto ks = decode_kallsyms(fm.span())) infer_from_kallsyms(*ks, fh.kcv);
+                infer_from_kernel_strings(fm.span(), fh.kcv);
+            }
         }
     }
     if (passes.licenses) fh.licenses = scan_licenses(fh.path, fm.span());
@@ -238,10 +274,13 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
             rep.distro_id = std::move(fh.distro_id);
             rep.distro_version = std::move(fh.distro_version);
         }
-        if (!rep.has_kconfig && fh.has_kconfig) {
-            rep.has_kconfig = true;
-            rep.kconfig_enabled = std::move(fh.kconfig_enabled);
+        if (fh.has_kconfig) rep.has_kconfig = true;
+        // Keep the first (or largest) verbatim config recovered, preferring one.
+        if (!fh.kconfig_text.empty() && fh.kconfig_text.size() > rep.kconfig_text.size()) {
+            rep.kconfig_text = std::move(fh.kconfig_text);
+            rep.kconfig_source = std::move(fh.kconfig_source);
         }
+        merge_view(rep.kcv, fh.kcv);
     }
     // Symlink-target libc components, through the same dedup.
     for (auto& c : sym_components) {

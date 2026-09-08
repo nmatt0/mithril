@@ -28,4 +28,7 @@ python3 tests/test_licenses.py "./$BUILD/mithril"
 echo "== integration: kconfig (hand-rolled DEFLATE) =="
 python3 tests/test_kconfig.py "./$BUILD/mithril"
 
+echo "== integration: kconfig recovery + tri-state kernel-CVE gating =="
+python3 tests/test_kconfig_recovery.py "./$BUILD/mithril"
+
 echo "== all tests passed =="

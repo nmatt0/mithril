@@ -46,8 +46,10 @@ struct Report {
 
     // Kernel context (for the curated kernel-CVE checklist).
     std::string kernel_version;         // from the linux_kernel component, if any
-    bool has_kconfig = false;           // an embedded .config was recovered
-    std::set<std::string> kconfig_enabled;  // enabled CONFIG_* options
+    bool has_kconfig = false;           // an authoritative .config was recovered
+    KernelConfigView kcv;               // merged tri-state config knowledge
+    std::string kconfig_text;           // verbatim recovered .config (--dump-kconfig)
+    std::string kconfig_source;         // "ikconfig" / "on-disk .config" when recovered
 
     std::vector<Hit> secrets;          // content findings, category "secret"
     std::vector<Hit> notable;          // path-rule hits (credential/crypto/config files)

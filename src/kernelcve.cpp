@@ -1,5 +1,6 @@
 #include "kernelcve.hpp"
 
+#include "kconfig_infer.hpp"
 #include "version.hpp"
 
 namespace ft {
@@ -115,43 +116,74 @@ bool version_affected(const std::string& v, const KCve& e) {
 }  // namespace
 
 std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
-                                             const std::set<std::string>* enabled) {
+                                             const KernelConfigView* view) {
     std::vector<KernelCveResult> out;
     if (kernel_version.empty()) return out;
+    const bool have_cfg = view && !view->empty();
     for (const auto& e : table()) {
         if (!version_affected(kernel_version, e)) continue;
         KernelCveResult r;
         r.cve = e.cve;
         r.impact = e.impact;
         r.note = e.note;
-        if (!enabled) {
-            r.applicable = true;
+        if (!have_cfg) {
+            r.state = KcveState::Unknown;
+            r.applicable = false;
             r.reason = "config unknown (no kconfig recovered)";
             out.push_back(std::move(r));
             continue;
         }
-        // placeholder sentinel never matches a real config
-        bool ruled = false;
+        // Required options: any Off rules the CVE out; any Unknown (with no Off)
+        // leaves it undetermined; all On means the subsystem is present.
+        bool ruled = false, unknown = false;
+        std::string ev;
         for (const char* rq : e.req) {
-            if (enabled->find(rq) == enabled->end()) {
-                r.applicable = false;
-                r.reason = std::string("requires ") + rq + " (not enabled)";
+            std::string oe;
+            KcveState st = config_option_state(*view, rq, oe);
+            if (st == KcveState::RuledOut) {
+                r.state = KcveState::RuledOut;
+                r.reason = std::string("requires ") + rq + " (not enabled" +
+                           (oe.empty() ? "" : ", " + oe) + ")";
                 ruled = true;
                 break;
             }
+            if (st == KcveState::Unknown) { unknown = true; if (ev.empty()) ev = rq; }
         }
-        if (!ruled)
-            for (const char* m : e.mit)
-                if (enabled->find(m) != enabled->end()) {
-                    r.applicable = false;
+        if (!ruled) {
+            // Mitigations: any known-enabled mitigation rules it out.
+            for (const char* m : e.mit) {
+                std::string oe;
+                if (config_option_state(*view, m, oe) == KcveState::Applicable) {
+                    r.state = KcveState::RuledOut;
                     r.reason = std::string("mitigated by ") + m;
                     ruled = true;
                     break;
                 }
-        if (!ruled) r.reason = "subsystem present";
+            }
+        }
+        if (!ruled) {
+            if (unknown) {
+                r.state = KcveState::Unknown;
+                r.reason = ev.empty() ? "config undetermined" : (ev + " undetermined");
+            } else {
+                r.state = KcveState::Applicable;
+                r.reason = "subsystem present";
+            }
+        }
+        r.applicable = (r.state == KcveState::Applicable);
         out.push_back(std::move(r));
     }
     return out;
+}
+
+std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
+                                             const std::set<std::string>* enabled) {
+    if (!enabled) return kernel_cve_scan(kernel_version, static_cast<const KernelConfigView*>(nullptr));
+    KernelConfigView v;
+    v.enabled = *enabled;
+    v.authoritative = true;
+    for (const auto& o : v.enabled) v.evidence.emplace(o, "kconfig");
+    return kernel_cve_scan(kernel_version, &v);
 }
 
 }  // namespace ft

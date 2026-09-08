@@ -22,6 +22,8 @@
 #include "finding.hpp"
 #include "inflate.hpp"
 #include "jsonparse.hpp"
+#include "kallsyms.hpp"
+#include "kconfig_infer.hpp"
 #include "kernelcve.hpp"
 #include "langmanifest.hpp"
 #include "license.hpp"
@@ -448,11 +450,173 @@ static const ft::KernelCveResult* find_kcve(const std::vector<ft::KernelCveResul
         if (k.cve == cve) return &k;
     return nullptr;
 }
+
+// ------------------------------------------------------------------ kallsyms
+// Build a minimal but format-faithful kallsyms image: an absolute-address array
+// (the anchor), num_syms, the token-compressed names blob, then the 256-entry
+// token table + index. Tokens are single characters, so a symbol's token-index
+// bytes are just its characters — keeps the fixture readable while exercising
+// the real decoder (token-table location, address anchor, name decode).
+static std::vector<uint8_t> build_kallsyms(const std::vector<std::string>& syms) {
+    std::vector<uint8_t> b;
+    auto u32 = [&](uint32_t v) {
+        b.push_back(v & 0xff);
+        b.push_back((v >> 8) & 0xff);
+        b.push_back((v >> 16) & 0xff);
+        b.push_back((v >> 24) & 0xff);
+    };
+    size_t n = syms.size();
+    for (size_t i = 0; i < n; ++i) u32(0x80000000u + uint32_t(i * 4));  // addresses (monotonic)
+    u32(uint32_t(n));                                                    // kallsyms_num_syms
+    for (const auto& s : syms) {                                         // kallsyms_names
+        b.push_back(uint8_t(s.size()));  // token count == char count (1 char/token)
+        for (char c : s) b.push_back(uint8_t(c));
+    }
+    if (b.size() & 1) b.push_back(0x00);  // 2-align the token tables (as the linker does)
+    // token_table: entry i = char i (i==0 -> '.', unused) then NUL, at offset 2i.
+    for (int i = 0; i < 256; ++i) {
+        b.push_back(i == 0 ? uint8_t('.') : uint8_t(i));
+        b.push_back(0x00);
+    }
+    for (int i = 0; i < 256; ++i) {  // token_index: 2*i, little-endian
+        uint16_t off = uint16_t(2 * i);
+        b.push_back(off & 0xff);
+        b.push_back((off >> 8) & 0xff);
+    }
+    return b;
+}
+
+static void test_kallsyms() {
+    std::vector<std::string> syms = {"Tcommit_creds", "Tprepare_kernel_cred", "Tpacket_rcv",
+                                     "Tovl_fill_super"};
+    while (syms.size() < 2100) syms.push_back("Tsym" + std::to_string(syms.size()));  // >= anchor min
+    auto blob = build_kallsyms(syms);
+    auto ks = ft::decode_kallsyms(std::span<const uint8_t>(blob.data(), blob.size()));
+    CHECK(ks.has_value());
+    if (ks) {
+        CHECK(ks->complete);
+        CHECK(ks->has("commit_creds"));         // type char stripped
+        CHECK(ks->has("packet_rcv"));
+        CHECK(ks->has("ovl_fill_super"));
+        CHECK(!ks->has("nft_do_chain"));        // not in the fixture
+        CHECK(ks->names.size() == syms.size());
+    }
+    // Garbage / too small -> no table, no crash.
+    std::vector<uint8_t> junk(8192, 0x41);
+    CHECK(!ft::decode_kallsyms(std::span<const uint8_t>(junk.data(), junk.size())).has_value());
+}
+
+static void test_kconfig_infer() {
+    using namespace ft;
+    std::string ev;
+
+    // Source 1: a real .config is authoritative.
+    {
+        KernelConfigView v;
+        std::string cfg =
+            "#\n# Automatically generated file\n#\n"
+            "CONFIG_PACKET=y\nCONFIG_NF_TABLES=m\n# CONFIG_IO_URING is not set\n";
+        infer_from_kconfig_text(cfg, v);
+        CHECK(v.authoritative);
+        CHECK(config_option_state(v, "CONFIG_PACKET", ev) == KcveState::Applicable);
+        CHECK(config_option_state(v, "CONFIG_NF_TABLES", ev) == KcveState::Applicable);  // =m counts
+        // Authoritative: anything not enabled is ruled out (even without a symbol).
+        CHECK(config_option_state(v, "CONFIG_IO_URING", ev) == KcveState::RuledOut);
+        CHECK(config_option_state(v, "CONFIG_TIPC", ev) == KcveState::RuledOut);
+    }
+
+    // Source 2: modules (a .ko path and a modules.builtin manifest).
+    {
+        KernelConfigView v;
+        infer_from_ko_path("lib/modules/5.4.0/kernel/net/mac80211/mac80211.ko", v);
+        std::string mb = "kernel/net/netfilter/nf_tables.ko\nkernel/fs/overlayfs/overlay.ko\n";
+        infer_from_modules_builtin(std::span<const uint8_t>(
+                                       reinterpret_cast<const uint8_t*>(mb.data()), mb.size()),
+                                   v);
+        CHECK(v.modules_seen);
+        CHECK(config_option_state(v, "CONFIG_MAC80211", ev) == KcveState::Applicable);
+        CHECK(ev == "ko-file");
+        CHECK(config_option_state(v, "CONFIG_NF_TABLES", ev) == KcveState::Applicable);
+        CHECK(config_option_state(v, "CONFIG_OVERLAY_FS", ev) == KcveState::Applicable);
+        // A .ko outside a modules tree must not count.
+        KernelConfigView v2;
+        infer_from_ko_path("usr/lib/foo/mac80211.ko", v2);
+        CHECK(config_option_state(v2, "CONFIG_MAC80211", ev) == KcveState::Unknown);
+    }
+
+    // Source 3: kallsyms rule-in and (builtin-only) rule-out; modular stays unknown.
+    {
+        KernelConfigView v;
+        Kallsyms ks;
+        ks.complete = true;
+        ks.names.insert("packet_rcv");
+        ks.names.insert("ovl_fill_super");
+        // no io_uring / user_ns / nft symbols
+        infer_from_kallsyms(ks, v);
+        CHECK(config_option_state(v, "CONFIG_PACKET", ev) == KcveState::Applicable);
+        CHECK(ev == "kallsyms");
+        // builtin-only subsystem, absent on a complete table -> ruled out
+        CHECK(config_option_state(v, "CONFIG_IO_URING", ev) == KcveState::RuledOut);
+        CHECK(config_option_state(v, "CONFIG_USER_NS", ev) == KcveState::RuledOut);
+        // modular-capable subsystem, absent but no module info -> undetermined
+        CHECK(config_option_state(v, "CONFIG_NF_TABLES", ev) == KcveState::Unknown);
+        CHECK(config_option_state(v, "CONFIG_MAC80211", ev) == KcveState::Unknown);
+    }
+
+    // Source 3+2: complete kallsyms + a modules tree lets modular options rule out.
+    {
+        KernelConfigView v;
+        Kallsyms ks;
+        ks.complete = true;
+        ks.names.insert("commit_creds");
+        infer_from_kallsyms(ks, v);
+        v.modules_seen = true;  // a /lib/modules tree was present, nf_tables.ko not in it
+        CHECK(config_option_state(v, "CONFIG_NF_TABLES", ev) == KcveState::RuledOut);
+        CHECK(ev == "kallsyms+modules");
+    }
+
+    // merge_view keeps the highest-trust evidence label.
+    {
+        KernelConfigView a, bkv;
+        Kallsyms ks;
+        ks.names.insert("packet_rcv");
+        infer_from_kallsyms(ks, a);  // PACKET via kallsyms
+        std::string mb = "kernel/net/packet/af_packet.ko\n";
+        infer_from_modules_builtin(std::span<const uint8_t>(
+                                       reinterpret_cast<const uint8_t*>(mb.data()), mb.size()),
+                                   bkv);  // PACKET via modules.builtin (higher trust)
+        merge_view(a, bkv);
+        CHECK(config_option_state(a, "CONFIG_PACKET", ev) == KcveState::Applicable);
+        CHECK(ev == "modules.builtin");
+    }
+
+    // looks_like_kconfig: a real config yes, a stray fragment no.
+    {
+        std::string real = "#\n# Automatically generated file\n# Linux Kernel Configuration\n";
+        for (int i = 0; i < 60; ++i) real += "CONFIG_FOO" + std::to_string(i) + "=y\n";
+        for (int i = 0; i < 20; ++i) real += "# CONFIG_BAR" + std::to_string(i) + " is not set\n";
+        CHECK(looks_like_kconfig(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(real.data()), real.size())));
+        std::string frag = "see CONFIG_FOO and CONFIG_BAR in the manual\nCONFIG_X=1\n";
+        CHECK(!looks_like_kconfig(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(frag.data()), frag.size())));
+        // A buildroot/OpenWrt .config is just as CONFIG_-dense but is NOT a kernel
+        // config: no kernel markers -> must be rejected (else it would falsely
+        // rule every kernel subsystem out).
+        std::string ow = "#\n# Automatically generated file\n# OpenWrt Configuration\n";
+        for (int i = 0; i < 60; ++i) ow += "CONFIG_PACKAGE_util" + std::to_string(i) + "=y\n";
+        for (int i = 0; i < 20; ++i) ow += "# CONFIG_TARGET_x" + std::to_string(i) + " is not set\n";
+        CHECK(!looks_like_kconfig(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(ow.data()), ow.size())));
+    }
+}
+static const ft::KernelConfigView* NOCFG = nullptr;
 static void test_kernelcve() {
-    // No config: in-range CVEs applicable but flagged "config unknown".
-    auto r = ft::kernel_cve_scan("5.16.5", nullptr);
+    // No config: in-range CVEs undetermined, flagged "config unknown".
+    auto r = ft::kernel_cve_scan("5.16.5", NOCFG);
     const auto* dp = find_kcve(r, "CVE-2022-0847");  // Dirty Pipe 5.8..5.16.11
-    CHECK(dp && dp->applicable && dp->reason.find("config unknown") != std::string::npos);
+    CHECK(dp && dp->state == ft::KcveState::Unknown && !dp->applicable &&
+          dp->reason.find("config unknown") != std::string::npos);
     CHECK(find_kcve(r, "CVE-2016-5195") == nullptr);  // Dirty COW fixed 4.8.3 -> out of range
 
     // Config gating: NF_TABLES present -> nftables applies; io_uring absent -> ruled out.
@@ -470,22 +634,23 @@ static void test_kernelcve() {
     CHECK(ebpf && !ebpf->applicable && ebpf->reason.find("mitigated") != std::string::npos);
 
     // A kernel newer than every curated fix -> nothing in range.
-    CHECK(find_kcve(ft::kernel_cve_scan("6.10", nullptr), "CVE-2022-0847") == nullptr);
+    CHECK(find_kcve(ft::kernel_cve_scan("6.10", NOCFG), "CVE-2022-0847") == nullptr);
     // Empty version -> nothing.
-    CHECK(ft::kernel_cve_scan("", nullptr).empty());
+    CHECK(ft::kernel_cve_scan("", NOCFG).empty());
 
     // TowelRoot (futex, no gate): applies to an old kernel, ruled out by version later.
-    CHECK(find_kcve(ft::kernel_cve_scan("3.4.0", nullptr), "CVE-2014-3153") != nullptr);
-    CHECK(find_kcve(ft::kernel_cve_scan("4.4.0", nullptr), "CVE-2014-3153") == nullptr);  // fixed 3.15
+    CHECK(find_kcve(ft::kernel_cve_scan("3.4.0", NOCFG), "CVE-2014-3153") != nullptr);
+    CHECK(find_kcve(ft::kernel_cve_scan("4.4.0", NOCFG), "CVE-2014-3153") == nullptr);  // fixed 3.15
 
     // Remote WiFi RCE gated on CONFIG_MAC80211 (introduced 5.1, fixed 6.1).
     std::set<std::string> wifi = {"CONFIG_MAC80211"};
     auto rw = ft::kernel_cve_scan("5.10", &wifi);
     const auto* mb = find_kcve(rw, "CVE-2022-42719");
     CHECK(mb && mb->applicable && mb->impact == std::string("RCE"));
-    auto rw2 = ft::kernel_cve_scan("5.10", nullptr);  // no config -> unknown, still listed
+    auto rw2 = ft::kernel_cve_scan("5.10", NOCFG);  // no config -> unknown, still listed
     const auto* mb2 = find_kcve(rw2, "CVE-2022-42719");
-    CHECK(mb2 && mb2->applicable && mb2->reason.find("config unknown") != std::string::npos);
+    CHECK(mb2 && mb2->state == ft::KcveState::Unknown &&
+          mb2->reason.find("config unknown") != std::string::npos);
     // Without MAC80211 the WiFi bug is ruled out. (Bind the vector to a local:
     // find_kcve returns a pointer into it, so it must outlive the deref.)
     std::set<std::string> nowifi = {"CONFIG_NF_TABLES"};
@@ -501,6 +666,22 @@ static void test_kernelcve() {
     auto rb = ft::kernel_cve_scan("4.14", &binder);
     const auto* bd = find_kcve(rb, "CVE-2019-2215");
     CHECK(bd && bd->applicable);
+
+    // Tri-state view: inferred (non-authoritative) config yields Applicable /
+    // RuledOut / Unknown as the evidence supports.
+    ft::KernelConfigView v;
+    v.enabled.insert("CONFIG_PACKET");        // proven present (e.g. kallsyms)
+    v.evidence["CONFIG_PACKET"] = "kallsyms";
+    v.kallsyms_complete = true;
+    v.not_builtin.insert("CONFIG_IO_URING");  // builtin-only, absent -> ruled out
+    v.not_builtin.insert("CONFIG_NF_TABLES"); // modular, absent, no modules -> unknown
+    auto tv = ft::kernel_cve_scan("5.10", &v);
+    const auto* pk = find_kcve(tv, "CVE-2021-22600");  // af_packet, needs CONFIG_PACKET (fixed 5.16)
+    CHECK(pk && pk->state == ft::KcveState::Applicable);
+    const auto* io = find_kcve(tv, "CVE-2022-2602");  // needs CONFIG_IO_URING
+    CHECK(io && io->state == ft::KcveState::RuledOut && io->reason.find("kallsyms") != std::string::npos);
+    const auto* nf = find_kcve(tv, "CVE-2023-32233");  // needs CONFIG_NF_TABLES
+    CHECK(nf && nf->state == ft::KcveState::Unknown);
 }
 
 // ---------------------------------------------------------------- inflate
@@ -1011,6 +1192,8 @@ int main() {
     test_credstore_htpasswd();
     test_credstore_dispatch();
     test_kernelcve();
+    test_kallsyms();
+    test_kconfig_infer();
     test_inflate();
     test_binver();
     test_kernel();

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "kconfig_infer.hpp"
+
 namespace ft {
 
 namespace {
@@ -196,25 +198,60 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
         }
     }
 
-    // ---- curated kernel CVEs (applicable, then ruled-out) ----
+    // ---- curated kernel CVEs (applicable, undetermined, then ruled-out) ----
     if (passes.cve && !rep.kernel_cves.empty()) {
         o += "\n";
-        size_t app = 0;
-        for (const auto& k : rep.kernel_cves)
-            if (k.applicable) ++app;
+        size_t app = 0, unk = 0, ruled = 0;
+        for (const auto& k : rep.kernel_cves) {
+            if (k.state == KcveState::Applicable) ++app;
+            else if (k.state == KcveState::Unknown) ++unk;
+            else ++ruled;
+        }
         o += a.bold();
         o += std::to_string(app);
         o += " applicable kernel CVE";
         o += app == 1 ? "" : "s";
         o += a.reset();
         o += " (of " + std::to_string(rep.kernel_cves.size()) + " in range for " +
-             rep.kernel_version + ")\n\n";
+             rep.kernel_version + ")";
+        if (unk || ruled) {
+            o += a.dim();
+            o += "  [" + std::to_string(ruled) + " ruled out, " + std::to_string(unk) +
+                 " undetermined]";
+            o += a.reset();
+        }
+        // Config posture: how we learned the config, plus the hardening flags,
+        // color-coded green=good / yellow=warn / red=bad / (default)=info.
+        const auto& kcv = rep.kcv;
+        o += a.dim();
+        o += "\n  config: ";
+        o += a.reset();
+        if (kcv.authoritative) {
+            o += rep.kconfig_source == "ikconfig" ? "recovered .config (embedded IKCONFIG)"
+                 : rep.kconfig_source.empty()     ? "recovered .config"
+                                                  : ("recovered .config (" + rep.kconfig_source + ")");
+            o += a.dim();
+            o += " (" + std::to_string(kcv.enabled.size()) + " options set)";
+            o += a.reset();
+        } else if (kcv.kallsyms_complete || kcv.modules_seen || !kcv.enabled.empty()) {
+            o += "inferred";
+            o += a.dim();
+            o += kcv.kallsyms_complete ? " (kallsyms" : " (";
+            if (kcv.modules_seen) o += kcv.kallsyms_complete ? " + modules" : "modules";
+            o += "; no .config)";
+            o += a.reset();
+        } else {
+            o += a.dim();
+            o += "unknown (no config, no kallsyms)";
+            o += a.reset();
+        }
+        o += "\n\n";
         size_t wcve = 3;
         for (const auto& k : rep.kernel_cves) wcve = std::max(wcve, k.cve.size());
         for (const auto& k : rep.kernel_cves) {
-            if (!k.applicable) continue;
+            if (k.state != KcveState::Applicable) continue;
             o += "  ";
-            o += a.yellow();
+            o += a.red();  // applicable == exploitable attack surface -> bad
             pad(o, k.cve, wcve);
             o += a.reset();
             o += "  ";
@@ -232,29 +269,74 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 std::snprintf(b, sizeof(b), " epss=%.2f", k.epss);
                 o += b;
             }
-            if (!rep.has_kconfig) {
-                o += a.dim();
-                o += " [config unknown]";
-                o += a.reset();
-            }
             o += "\n";
         }
-        // ruled-out (only meaningful when we had a config to gate with)
-        bool any_ruled = false;
-        for (const auto& k : rep.kernel_cves)
-            if (!k.applicable) any_ruled = true;
-        if (any_ruled) {
+        // undetermined (in range, but the gating config option is unknown)
+        if (unk) {
             o += "\n";
             o += a.dim();
-            o += "  ruled out by kconfig:";
+            o += "  undetermined (config signal incomplete):";
             o += a.reset();
             o += "\n";
             for (const auto& k : rep.kernel_cves) {
-                if (k.applicable) continue;
+                if (k.state != KcveState::Unknown) continue;
                 o += "    ";
                 o += a.dim();
                 pad(o, k.cve, wcve);
                 o += "  " + k.reason;
+                o += a.reset();
+                o += "\n";
+            }
+        }
+        // ruled-out, with the evidence that ruled each out
+        if (ruled) {
+            o += "\n";
+            o += a.dim();
+            o += "  ruled out by config:";
+            o += a.reset();
+            o += "\n";
+            for (const auto& k : rep.kernel_cves) {
+                if (k.state != KcveState::RuledOut) continue;
+                o += "    ";
+                o += a.green();  // ruled out == surface removed -> good
+                pad(o, k.cve, wcve);
+                o += a.reset();
+                o += a.dim();
+                o += "  " + k.reason;
+                o += a.reset();
+                o += "\n";
+            }
+        }
+    }
+
+    // ---- kernel hardening (its own section; only from a recovered .config) ----
+    if ((passes.cve || passes.sbom) && !rep.kconfig_text.empty()) {
+        auto items = kernel_hardening(rep.kconfig_text);
+        if (!items.empty()) {
+            o += "\n";
+            o += a.bold();
+            o += "Kernel hardening";
+            o += a.reset();
+            o += a.dim();
+            o += rep.kconfig_source == "ikconfig" ? "  (from embedded .config)"
+                                                  : "  (from recovered .config)";
+            o += a.reset();
+            o += "\n\n";
+            size_t w = 0;
+            for (const auto& it : items) w = std::max(w, std::string(it.name).size());
+            for (const auto& it : items) {
+                o += "  ";
+                pad(o, it.name, w);
+                o += "  ";
+                const char* label;
+                const char* col;
+                switch (it.state) {
+                    case HardState::On: label = "[enabled]"; col = a.green(); break;
+                    case HardState::Off: label = "[disabled]"; col = a.red(); break;
+                    default: label = "[not available]"; col = a.dim(); break;
+                }
+                o += col;
+                o += label;
                 o += a.reset();
                 o += "\n";
             }

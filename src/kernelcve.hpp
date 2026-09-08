@@ -16,27 +16,58 @@
 // confirm the backport", which is exactly the triage an operator wants.
 #pragma once
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace ft {
 
+// Per-CVE gating outcome. Three states, because config knowledge is not binary:
+// a subsystem can be known-present, known-absent, or undetermined.
+enum class KcveState { Applicable, RuledOut, Unknown };
+
 struct KernelCveResult {
     std::string cve;
     std::string impact;      // "LPE" / "RCE" / ...
     std::string note;        // short description + exploit context
-    bool applicable = true;  // false = ruled out by kconfig
-    std::string reason;      // why applicable/ruled-out ("config unknown", "requires CONFIG_X", ...)
+    KcveState state = KcveState::Applicable;
+    bool applicable = true;  // == (state == Applicable); kept for existing callers
+    std::string reason;      // why applicable/ruled-out/unknown, with the evidence source
     // Value-add annotations (never affect applicability):
     bool kev = false;        // on the CISA Known-Exploited catalog
     double epss = -1.0;      // EPSS exploit-probability (0..1), -1 if unknown
 };
 
-// Match a kernel version against the curated table. `enabled` is the set of
-// enabled CONFIG_* options from the target's .config, or nullptr when no config
-// was recovered (then nothing is ruled out — findings are marked "config
-// unknown"). Results include both applicable and ruled-out entries.
+// Tri-state config knowledge assembled from every available source: an embedded
+// or on-disk .config (authoritative), kallsyms symbols, /lib/modules contents,
+// and kernel-image strings. Positive evidence rules a subsystem in; a recovered
+// .config or a complete-kallsyms-plus-module-exclusion rules it out; otherwise
+// an option is undetermined. See kconfig_infer for how it is populated and read.
+struct KernelConfigView {
+    std::set<std::string> enabled;             // options proven present (any source)
+    std::map<std::string, std::string> evidence;  // option -> source label for the verdict
+    std::set<std::string> not_builtin;         // complete kallsyms, builtin symbol absent
+    std::set<std::string> modules_present;     // option has a .ko / modules.builtin entry
+    bool authoritative = false;   // a real .config was recovered: not-enabled == disabled
+    bool kallsyms_complete = false;
+    bool modules_seen = false;    // a /lib/modules tree or modules.builtin was present
+
+    bool empty() const {
+        return enabled.empty() && not_builtin.empty() && modules_present.empty() &&
+               !authoritative;
+    }
+};
+
+// Match a kernel version against the curated table, gating each entry with the
+// tri-state config view (nullptr = no config knowledge at all -> every in-range
+// entry is Unknown, "config unknown"). Results include applicable, ruled-out,
+// and undetermined entries.
+std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
+                                             const KernelConfigView* view);
+
+// Back-compat convenience: an authoritative enabled-set (nullptr = unknown).
+// Equivalent to a KernelConfigView{enabled=*enabled, authoritative=true}.
 std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
                                              const std::set<std::string>* enabled);
 

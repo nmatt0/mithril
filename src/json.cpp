@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "kconfig_infer.hpp"
 #include "strutil.hpp"
 
 namespace ft {
@@ -197,6 +198,11 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             bool kf = true;
             kv_str(o, "cve", k.cve, kf);
             kv_str(o, "impact", k.impact, kf);
+            kv_str(o, "state",
+                   k.state == KcveState::Applicable
+                       ? "applicable"
+                       : (k.state == KcveState::RuledOut ? "ruled_out" : "undetermined"),
+                   kf);
             kv_bool(o, "applicable", k.applicable, kf);
             kv_str(o, "reason", k.reason, kf);
             kv_str(o, "note", k.note, kf);
@@ -212,6 +218,57 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             o += "}";
         }
         o += "]";
+
+        // Structured config evidence behind the kernel-CVE gating: source, whether
+        // a verbatim .config was recovered, hardening posture, and the per-option
+        // On/Off/Unknown state with the evidence that decided it.
+        const KernelConfigView& kcv = rep.kcv;
+        std::string src = kcv.authoritative
+                              ? (rep.kconfig_source.empty() ? "recovered" : rep.kconfig_source)
+                              : ((kcv.kallsyms_complete || kcv.modules_seen || !kcv.enabled.empty())
+                                     ? "inferred"
+                                     : "none");
+        o += ",\"kernel_config\":{";
+        bool cf = true;
+        kv_str(o, "source", src, cf);
+        kv_bool(o, "recovered", !rep.kconfig_text.empty(), cf);
+        if (kcv.authoritative) {
+            kv_num(o, "options_enabled", static_cast<double>(kcv.enabled.size()), cf);
+            // Tri-state hardening posture: enabled / disabled / not_available.
+            o += ",\"hardening\":[";
+            bool hf = true;
+            for (const auto& it : kernel_hardening(rep.kconfig_text)) {
+                const char* st = it.state == HardState::On    ? "enabled"
+                                 : it.state == HardState::Off ? "disabled"
+                                                              : "not_available";
+                if (!hf) o += ",";
+                hf = false;
+                o += "{";
+                bool nf = true;
+                kv_str(o, "name", it.name, nf);
+                kv_str(o, "state", st, nf);
+                o += "}";
+            }
+            o += "]";
+        }
+        o += ",\"options\":[";
+        bool first_opt = true;
+        for (const auto& opt : gating_options()) {
+            std::string ev;
+            KcveState st = config_option_state(kcv, opt, ev);
+            const char* ss = st == KcveState::Applicable ? "on"
+                             : st == KcveState::RuledOut  ? "off"
+                                                          : "unknown";
+            if (!first_opt) o += ",";
+            first_opt = false;
+            o += "{";
+            bool of = true;
+            kv_str(o, "name", opt, of);
+            kv_str(o, "state", ss, of);
+            if (!ev.empty()) kv_str(o, "evidence", ev, of);
+            o += "}";
+        }
+        o += "]}";
     }
 
     if (passes.licenses) {

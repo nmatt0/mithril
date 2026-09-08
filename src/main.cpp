@@ -55,6 +55,7 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --fetch-db      Download a prebuilt CVE mirror, then exit\n"
                  "      --update-db     Rebuild the local CVE mirror from source, then exit\n"
                  "  -C, --outdir <DIR>  Write the JSON report to DIR/mithril-report.json\n"
+                 "      --dump-kconfig  Print the recovered kernel .config to stdout, then exit\n"
                  "      --threads <N>   Worker threads for tree scans (default: auto)\n"
                  "  -h, --help          Print help\n"
                  "      --version       Print version\n\n");
@@ -81,6 +82,7 @@ int main(int argc, char** argv) {
     bool json_out = false;
     bool update_db = false;
     bool fetch_db = false;
+    bool dump_kconfig = false;
     Passes passes;
     bool have_path = false;
     bool end_of_opts = false;
@@ -121,6 +123,8 @@ int main(int argc, char** argv) {
             update_db = true;
         } else if (!end_of_opts && std::strcmp(a, "--fetch-db") == 0) {
             fetch_db = true;
+        } else if (!end_of_opts && std::strcmp(a, "--dump-kconfig") == 0) {
+            dump_kconfig = true;
         } else if (!end_of_opts && std::strcmp(a, "--rules") == 0 && i + 1 < argc) {
             rules_cli = argv[++i];
         } else if (!end_of_opts && std::strcmp(a, "--threads") == 0 && i + 1 < argc) {
@@ -173,6 +177,9 @@ int main(int argc, char** argv) {
     // against, so --cve implies the SBOM pass.
     Passes impl = passes;
     if (impl.cve) impl.sbom = true;
+    // --dump-kconfig only needs the config extraction that rides the SBOM pass;
+    // run just that, print the recovered .config, and exit before the report.
+    if (dump_kconfig) { impl = Passes{}; impl.sbom = true; }
 
     // Load user-defined rules, if any. A load error is fatal (a typo in a rule
     // file should not silently scan with fewer rules than the operator thinks).
@@ -188,6 +195,18 @@ int main(int argc, char** argv) {
     }
 
     Report rep = scan_path(path, impl, threads, user.content, user.paths);
+
+    // --dump-kconfig: emit the verbatim recovered .config (IKCONFIG or on-disk)
+    // and exit. Nonzero when none was found so scripts can tell.
+    if (dump_kconfig) {
+        if (rep.kconfig_text.empty()) {
+            std::fprintf(stderr, "%s: no kernel .config recovered from %s\n", prog, path.c_str());
+            return 1;
+        }
+        std::fwrite(rep.kconfig_text.data(), 1, rep.kconfig_text.size(), stdout);
+        if (rep.kconfig_text.back() != '\n') std::fputc('\n', stdout);
+        return 0;
+    }
 
     // CVE join (downstream of the SBOM): match components against the local
     // mirror. OSV covers package-DB components (dpkg/apk); the NVD augment covers
@@ -225,8 +244,7 @@ int main(int argc, char** argv) {
         }
         // Curated kernel-CVE checklist, gated by version + kconfig (independent of
         // the OSV/NVD mirror — the table is built in).
-        rep.kernel_cves = kernel_cve_scan(rep.kernel_version,
-                                          rep.has_kconfig ? &rep.kconfig_enabled : nullptr);
+        rep.kernel_cves = kernel_cve_scan(rep.kernel_version, &rep.kcv);
 
         // Value-add annotation only (never affects applicability): tag findings
         // that are on CISA KEV or carry an EPSS score.
