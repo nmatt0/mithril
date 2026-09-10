@@ -176,6 +176,8 @@ std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
     return out;
 }
 
+std::size_t kernel_cve_curated_total() { return table().size(); }
+
 std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
                                              const std::set<std::string>* enabled) {
     if (!enabled) return kernel_cve_scan(kernel_version, static_cast<const KernelConfigView*>(nullptr));

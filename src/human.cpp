@@ -199,26 +199,44 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
     }
 
     // ---- curated kernel CVEs (applicable, undetermined, then ruled-out) ----
-    if (passes.cve && !rep.kernel_cves.empty()) {
+    // Printed whenever a kernel version was detected, even with zero in-range
+    // curated hits: the curated list is a high-signal set, not an exhaustive one,
+    // so a modern kernel that outruns the table must still show a line rather than
+    // vanish (which reads as "mithril did not see the kernel").
+    if (passes.cve && !rep.kernel_version.empty()) {
         o += "\n";
+        o += a.bold();
+        o += "Kernel CVEs";
+        o += a.reset();
+        o += a.dim();
+        o += "  (curated high-signal checklist, not a full CVE list)";
+        o += a.reset();
+        o += "\n\n  ";
         size_t app = 0, unk = 0, ruled = 0;
         for (const auto& k : rep.kernel_cves) {
             if (k.state == KcveState::Applicable) ++app;
             else if (k.state == KcveState::Unknown) ++unk;
             else ++ruled;
         }
-        o += a.bold();
-        o += std::to_string(app);
-        o += " applicable kernel CVE";
-        o += app == 1 ? "" : "s";
-        o += a.reset();
-        o += " (of " + std::to_string(rep.kernel_cves.size()) + " in range for " +
-             rep.kernel_version + ")";
-        if (unk || ruled) {
+        if (rep.kernel_cves.empty()) {
             o += a.dim();
-            o += "  [" + std::to_string(ruled) + " ruled out, " + std::to_string(unk) +
-                 " undetermined]";
+            o += "kernel " + rep.kernel_version + " detected; 0 of " +
+                 std::to_string(kernel_cve_curated_total()) +
+                 " curated checks in range for this version";
             o += a.reset();
+        } else {
+            o += a.bold();
+            o += std::to_string(app);
+            o += a.reset();
+            o += " applicable of " + std::to_string(rep.kernel_cves.size()) +
+                 " curated check" + (rep.kernel_cves.size() == 1 ? "" : "s") +
+                 " in range for " + rep.kernel_version;
+            if (unk || ruled) {
+                o += a.dim();
+                o += "  [" + std::to_string(ruled) + " ruled out, " + std::to_string(unk) +
+                     " undetermined]";
+                o += a.reset();
+            }
         }
         // Config posture: how we learned the config, plus the hardening flags,
         // color-coded green=good / yellow=warn / red=bad / (default)=info.
@@ -307,6 +325,13 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 o += "\n";
             }
         }
+        // The curated table is deliberately partial: high-signal, widely-exploited
+        // bugs only. Say so, so an empty or short list is never read as exhaustive.
+        o += "\n";
+        o += a.dim();
+        o += "  Curated set of widely-exploited kernel bugs, not every CVE for this version.";
+        o += a.reset();
+        o += "\n";
     }
 
     // ---- kernel hardening (its own section; only from a recovered .config) ----

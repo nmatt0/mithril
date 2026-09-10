@@ -219,6 +219,33 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
         }
         o += "]";
 
+        // Metadata that makes the curated, non-exhaustive nature of the kernel
+        // scan machine-readable: an empty "kernel_cves" means "none of the curated
+        // set is in range", not "this kernel has no known CVEs". LLM/tool callers
+        // read this rather than inferring exhaustiveness from the array length.
+        if (!rep.kernel_version.empty()) {
+            size_t kapp = 0, kunk = 0, kruled = 0;
+            for (const auto& k : rep.kernel_cves) {
+                if (k.state == KcveState::Applicable) ++kapp;
+                else if (k.state == KcveState::Unknown) ++kunk;
+                else ++kruled;
+            }
+            o += ",\"kernel_cve_scan\":{";
+            bool sf = true;
+            kv_str(o, "method", "curated-checklist", sf);
+            kv_bool(o, "exhaustive", false, sf);
+            kv_num(o, "curated_total", kernel_cve_curated_total(), sf);
+            kv_num(o, "in_range", rep.kernel_cves.size(), sf);
+            kv_num(o, "applicable", kapp, sf);
+            kv_num(o, "undetermined", kunk, sf);
+            kv_num(o, "ruled_out", kruled, sf);
+            kv_str(o, "note",
+                   "curated high-signal set of widely-exploited kernel bugs, "
+                   "not every CVE affecting this version",
+                   sf);
+            o += "}";
+        }
+
         // Structured config evidence behind the kernel-CVE gating: source, whether
         // a verbatim .config was recovered, hardening posture, and the per-option
         // On/Off/Unknown state with the evidence that decided it.

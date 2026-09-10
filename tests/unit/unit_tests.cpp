@@ -682,6 +682,15 @@ static void test_kernelcve() {
     CHECK(io && io->state == ft::KcveState::RuledOut && io->reason.find("kallsyms") != std::string::npos);
     const auto* nf = find_kcve(tv, "CVE-2023-32233");  // needs CONFIG_NF_TABLES
     CHECK(nf && nf->state == ft::KcveState::Unknown);
+
+    // Curated-total accessor: positive, and >= the count of entries in range for
+    // any single version (the whole table is at least as large as any slice).
+    CHECK(ft::kernel_cve_curated_total() > 0);
+    CHECK(ft::kernel_cve_scan("5.10", NOCFG).size() <= ft::kernel_cve_curated_total());
+    // A kernel past every curated fix: nothing in range, but the total is unchanged
+    // (this is what lets the caller say "0 of N", not "no CVEs").
+    CHECK(ft::kernel_cve_scan("99.0", NOCFG).empty());
+    CHECK(ft::kernel_cve_curated_total() > ft::kernel_cve_scan("99.0", NOCFG).size());
 }
 
 // ---------------------------------------------------------------- inflate

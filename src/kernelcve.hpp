@@ -16,6 +16,7 @@
 // confirm the backport", which is exactly the triage an operator wants.
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>
@@ -70,5 +71,10 @@ std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
 // Equivalent to a KernelConfigView{enabled=*enabled, authoritative=true}.
 std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
                                              const std::set<std::string>* enabled);
+
+// Number of entries in the curated table. Lets the output report "N of <total>
+// curated checks in range" so an empty result reads as "none of the curated set
+// applies", not "this kernel has no CVEs".
+std::size_t kernel_cve_curated_total();
 
 }  // namespace ft
