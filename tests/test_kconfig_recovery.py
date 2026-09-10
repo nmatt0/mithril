@@ -158,7 +158,7 @@ def main():
         if scan.get("exhaustive") is not False or scan.get("method") != "curated-checklist":
             print(f"FAIL(3): kernel_cve_scan metadata missing/wrong: {scan}")
             fails += 1
-        if scan.get("in_range") != 0 or not scan.get("curated_total", 0) > 0:
+        if scan.get("curated_in_range") != 0 or not scan.get("curated_total", 0) > 0:
             print(f"FAIL(3): kernel_cve_scan counts wrong: {scan}")
             fails += 1
         # Human view must still print a Kernel CVEs line for this kernel (not vanish).

@@ -1,8 +1,9 @@
 name: update-db
 
-# Rebuild the offline vulnerability index from source (OSV + NVD + KEV + EPSS)
-# and publish it as a rolling `db-latest` GitHub Release, so clients can install
-# it with `mithril --fetch-db` instead of scraping the upstream feeds themselves.
+# Rebuild the offline vulnerability index from source (OSV + NVD + KEV + EPSS,
+# plus the full kernel.org Linux-CNA CVE feed for --kernel-cves-all) and publish
+# it as a rolling `db-latest` GitHub Release, so clients can install it with
+# `mithril --fetch-db` instead of scraping the upstream feeds themselves.
 # `mithril --update-db` remains the authoritative rebuild path; this just runs it
 # on a schedule and packages the result.
 on:
@@ -45,18 +46,20 @@ jobs:
           # cloud-IP throttling. Optional: the step still works unauthenticated
           # if the secret is unset (just slower).
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: ./build/mithril --update-db
+        run: ./build/mithril --update-db --with-kernel-feed
 
       - name: Package the release assets
         env:
           MITHRIL_DB: ${{ runner.temp }}/mithril-db
         run: |
           mkdir -p dist
-          gzip -c "$MITHRIL_DB/osv-index.mdb" > dist/osv-index.mdb.gz
-          gzip -c "$MITHRIL_DB/epss.txt"      > dist/epss.txt.gz
+          gzip -c "$MITHRIL_DB/osv-index.mdb"        > dist/osv-index.mdb.gz
+          gzip -c "$MITHRIL_DB/epss.txt"             > dist/epss.txt.gz
+          gzip -c "$MITHRIL_DB/kernel-cve-index.json" > dist/kernel-cve-index.json.gz
           cp "$MITHRIL_DB/nvd-index.json" dist/nvd-index.json
           cp "$MITHRIL_DB/kev.json"       dist/kev.json
-          ( cd dist && sha256sum osv-index.mdb.gz nvd-index.json kev.json epss.txt.gz > SHA256SUMS )
+          ( cd dist && sha256sum osv-index.mdb.gz nvd-index.json kev.json epss.txt.gz \
+                                 kernel-cve-index.json.gz > SHA256SUMS )
           echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/BUILD_INFO.txt
           ls -la dist
 
@@ -67,15 +70,18 @@ jobs:
           name: "Vulnerability index (rolling)"
           body: |
             Prebuilt offline vulnerability index for `mithril --fetch-db`
-            (OSV + NVD/CPE + CISA KEV + EPSS). Rebuilt weekly from the upstream
-            feeds. Each asset is checksummed in `SHA256SUMS`; `--fetch-db`
-            verifies before installing. This release is intentionally not marked
-            "Latest" so the versioned binary release keeps that badge.
+            (OSV + NVD/CPE + CISA KEV + EPSS), plus the optional full kernel.org
+            CVE feed (`kernel-cve-index.json.gz`) for `--fetch-db --with-kernel-feed`
+            / `--kernel-cves-all`. Rebuilt weekly from the upstream feeds. Each
+            asset is checksummed in `SHA256SUMS`; `--fetch-db` verifies before
+            installing. This release is intentionally not marked "Latest" so the
+            versioned binary release keeps that badge.
           make_latest: false
           files: |
             dist/osv-index.mdb.gz
             dist/nvd-index.json
             dist/kev.json
             dist/epss.txt.gz
+            dist/kernel-cve-index.json.gz
             dist/SHA256SUMS
             dist/BUILD_INFO.txt

@@ -31,4 +31,7 @@ python3 tests/test_kconfig.py "./$BUILD/mithril"
 echo "== integration: kconfig recovery + tri-state kernel-CVE gating =="
 python3 tests/test_kconfig_recovery.py "./$BUILD/mithril"
 
+echo "== integration: kernel.org feed (--kernel-cves-all) =="
+python3 tests/test_kernelfeed.py "./$BUILD/mithril"
+
 echo "== all tests passed =="

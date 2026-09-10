@@ -55,7 +55,8 @@ struct Report {
     std::vector<Hit> notable;          // path-rule hits (credential/crypto/config files)
     std::vector<Component> components;  // SBOM components (dpkg/opkg/apk/...)
     std::vector<CveMatch> cves;         // SBOM-vs-OSV join results
-    std::vector<KernelCveResult> kernel_cves;  // curated kernel-CVE checklist
+    std::vector<KernelCveResult> kernel_cves;  // curated checklist (+ feed if --kernel-cves-all)
+    bool kernel_cves_full = false;      // --kernel-cves-all: the kernel.org feed was merged in
     std::vector<Hit> licenses;          // license findings (SPDX tags + license files)
 
     // Files that could not be read (path -> reason), surfaced for honesty.

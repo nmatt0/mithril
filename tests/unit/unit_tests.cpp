@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>  // getpid, for a unique temp path in the feed round-trip test
+
 #include "ahocorasick.hpp"
 #include "binver.hpp"
 #include "component.hpp"
@@ -25,6 +27,7 @@
 #include "kallsyms.hpp"
 #include "kconfig_infer.hpp"
 #include "kernelcve.hpp"
+#include "kernelfeed.hpp"
 #include "langmanifest.hpp"
 #include "license.hpp"
 #include "reader.hpp"
@@ -449,6 +452,98 @@ static const ft::KernelCveResult* find_kcve(const std::vector<ft::KernelCveResul
     for (const auto& k : v)
         if (k.cve == cve) return &k;
     return nullptr;
+}
+
+// ------------------------------------------------------------- kernel.org feed
+static void test_kernelfeed() {
+    using namespace ft;
+
+    // --- matcher: branch-aware ---
+    // A CVE affected in several stable branches, fixed per branch, plus a mainline
+    // window. Modeled on the real kernel.org shape (CVE-2024-26581).
+    KernelFeedEntry e;
+    e.cve = "CVE-TEST-0001";
+    e.ranges = {{"5.15.124", "5.15.149"}, {"6.1.43", "6.1.78"}, {"6.6", "6.6.17"}};
+    e.mainline = {"6.5", "6.8"};
+    // In a branch window -> branch-exact.
+    CHECK(kernel_feed_basis("6.1.50", e) == "branch-exact");
+    CHECK(kernel_feed_basis("6.6.10", e) == "branch-exact");
+    // Past the branch fix -> not affected, even though the mainline window (6.5,6.8)
+    // numerically spans 6.6.110. This is the whole point: no cross-branch FP.
+    CHECK(kernel_feed_basis("6.6.110", e).empty());
+    CHECK(kernel_feed_basis("6.6.17", e).empty());
+    CHECK(kernel_feed_basis("6.1.78", e).empty());  // fixed exactly at the boundary
+    // Below the earliest affected -> not affected.
+    CHECK(kernel_feed_basis("5.10.5", e).empty());
+    // A true mainline release inside the mainline window -> broad-range.
+    CHECK(kernel_feed_basis("6.7", e) == "broad-range");
+    CHECK(kernel_feed_basis("6.5", e) == "broad-range");
+    CHECK(kernel_feed_basis("6.8", e).empty());  // mainline fixed
+
+    // A coarse (custom) single range: matches, but as broad-range (verify backport).
+    KernelFeedEntry c;
+    c.cve = "CVE-TEST-0002";
+    c.broad = {{"3.15", "6.8"}};
+    CHECK(kernel_feed_basis("6.6.110", c) == "broad-range");
+    CHECK(kernel_feed_basis("6.8", c).empty());
+    CHECK(kernel_feed_basis("3.10", c).empty());
+
+    // kernel_feed_scan: only in-range CVEs, source "kernel.org", sorted by id.
+    std::vector<KernelFeedEntry> feed = {e, c};
+    auto r = kernel_feed_scan("6.6.10", feed);
+    CHECK(r.size() == 2);  // e via branch-exact, c via broad
+    CHECK(r[0].cve == "CVE-TEST-0001" && r[0].source == "kernel.org" &&
+          r[0].state == KcveState::Applicable);
+    CHECK(kernel_feed_scan("6.6.110", feed).size() == 1);  // only the coarse c matches
+    CHECK(kernel_feed_scan("", feed).empty());
+
+    // --- reconstruction from a raw kernel.org CVE-5.0 cna object ---
+    // Two affected blocks: defaultStatus=unaffected with explicit affected
+    // intervals, defaultStatus=affected with per-branch fix points. The 6.6 branch
+    // fix (6.6.17) has no explicit interval -> must be reconstructed as [6.6, 6.6.17).
+    const char* rec = R"({
+      "affected": [
+        {"defaultStatus":"unaffected","versions":[
+          {"version":"6.1.43","lessThan":"6.1.78","status":"affected","versionType":"semver"},
+          {"version":"6.4.8","lessThan":"6.5","status":"affected","versionType":"semver"}
+        ]},
+        {"defaultStatus":"affected","versions":[
+          {"version":"0","lessThan":"6.5","status":"unaffected","versionType":"semver"},
+          {"version":"6.1.78","lessThanOrEqual":"6.1.*","status":"unaffected","versionType":"semver"},
+          {"version":"6.6.17","lessThanOrEqual":"6.6.*","status":"unaffected","versionType":"semver"},
+          {"version":"6.8","lessThanOrEqual":"*","status":"unaffected","versionType":"original_commit_for_fix"}
+        ]}
+      ],
+      "metrics":[{"cvssV3_1":{"baseScore":7.8,"baseSeverity":"HIGH"}}],
+      "title":"netfilter: nft_set_rbtree fix"
+    })";
+    auto doc = json_parse(rec);
+    CHECK(doc.has_value());
+    KernelFeedEntry re;
+    CHECK(kernel_feed_entry_from_cna(*doc, "CVE-2024-26581", re));
+    CHECK(re.severity == "HIGH");
+    CHECK(re.score == 7.8);
+    CHECK(re.mainline.introduced == "6.5" && re.mainline.fixed == "6.8");
+    // The reconstructed entry must classify 6.6.10 affected and 6.6.110 clean.
+    CHECK(kernel_feed_basis("6.6.10", re) == "branch-exact");   // [6.6, 6.6.17) derived
+    CHECK(kernel_feed_basis("6.6.110", re).empty());
+    CHECK(kernel_feed_basis("6.1.50", re) == "branch-exact");   // explicit [6.1.43, 6.1.78)
+    CHECK(kernel_feed_basis("6.1.90", re).empty());
+
+    // --- write -> load round-trip via the on-disk index format ---
+    std::string idx = write_kernel_feed_index(feed, 123456);
+    // Sanity: it is the documented schema and mentions our CVE ids.
+    CHECK(idx.find("mithril-kernel-cve-1") != std::string::npos);
+    CHECK(idx.find("CVE-TEST-0001") != std::string::npos);
+    std::string tmp = std::string("/tmp/mithril_kfeed_") + std::to_string(::getpid()) + ".json";
+    { std::FILE* f = std::fopen(tmp.c_str(), "wb"); std::fwrite(idx.data(), 1, idx.size(), f); std::fclose(f); }
+    auto loaded = load_kernel_feed(tmp);
+    std::remove(tmp.c_str());
+    CHECK(loaded.has_value() && loaded->size() == 2);
+    // Matching behaves identically through the serialized form.
+    CHECK(kernel_feed_basis("6.6.10", (*loaded)[0]) == "branch-exact");
+    CHECK(kernel_feed_basis("6.6.110", (*loaded)[0]).empty());
+    CHECK(load_kernel_feed("/nonexistent/path/kfeed.json") == std::nullopt);
 }
 
 // ------------------------------------------------------------------ kallsyms
@@ -1201,6 +1296,7 @@ int main() {
     test_credstore_htpasswd();
     test_credstore_dispatch();
     test_kernelcve();
+    test_kernelfeed();
     test_kallsyms();
     test_kconfig_infer();
     test_inflate();

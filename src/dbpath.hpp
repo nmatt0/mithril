@@ -23,4 +23,9 @@ std::string nvd_index_path();
 std::string kev_index_path();
 std::string epss_index_path();
 
+// The full kernel.org (Linux CNA) CVE feed index, consulted only by
+// --kernel-cves-all. An optional asset: fetched/built out-of-band, absent by
+// default so the base mirror stays lean.
+std::string kernel_feed_path();
+
 }  // namespace ft

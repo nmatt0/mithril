@@ -35,6 +35,9 @@ struct KernelCveResult {
     KcveState state = KcveState::Applicable;
     bool applicable = true;  // == (state == Applicable); kept for existing callers
     std::string reason;      // why applicable/ruled-out/unknown, with the evidence source
+    // Where this result came from: "curated" (the built-in high-signal table) or
+    // "kernel.org" (the full version-matched feed, only with --kernel-cves-all).
+    std::string source = "curated";
     // Value-add annotations (never affect applicability):
     bool kev = false;        // on the CISA Known-Exploited catalog
     double epss = -1.0;      // EPSS exploit-probability (0..1), -1 if unknown
