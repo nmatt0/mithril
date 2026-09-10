@@ -26,6 +26,7 @@ add_executable(mithril
   src/engine.cpp
   src/userrules.cpp
   src/credstore.cpp
+  src/derkey.cpp
   src/binver.cpp
   src/filever.cpp
   src/inflate.cpp
@@ -63,6 +64,7 @@ add_executable(mithril_unit
   src/engine.cpp
   src/userrules.cpp
   src/credstore.cpp
+  src/derkey.cpp
   src/binver.cpp
   src/filever.cpp
   src/inflate.cpp

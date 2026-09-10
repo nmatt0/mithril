@@ -11,6 +11,7 @@
 
 #include "binver.hpp"
 #include "credstore.hpp"
+#include "derkey.hpp"
 #include "engine.hpp"
 #include "file_map.hpp"
 #include "filever.hpp"
@@ -95,6 +96,11 @@ FileHits scan_one(const fs::path& path, const fs::path& root, const Passes& pass
         auto creds = scan_credstores(fh.path, fm.span());
         fh.secrets.insert(fh.secrets.end(), std::make_move_iterator(creds.begin()),
                           std::make_move_iterator(creds.end()));
+        // Raw DER private keys embedded in binary firmware (no PEM wrapper), which
+        // the text-anchored content engine cannot see. Scans the whole buffer.
+        auto derkeys = scan_der_private_keys(reader);
+        fh.secrets.insert(fh.secrets.end(), std::make_move_iterator(derkeys.begin()),
+                          std::make_move_iterator(derkeys.end()));
     }
     if (passes.sbom) {
         fh.components = scan_sbom(fh.path, fm.span());  // M4 package DBs
