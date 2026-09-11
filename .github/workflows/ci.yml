@@ -1,0 +1,76 @@
+name: ci
+
+# Build + test on every PR and on pushes to master. Complements release.yml
+# and update-db.yml. Three jobs:
+#   build-test  - gcc and clang, Release, the full unit + integration suite
+#   sanitizers  - ASan + UBSan build, same suite (memory safety on hostile input)
+#   fuzz-smoke  - a short libFuzzer run of the secrets target
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build + test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cc: gcc, cxx: g++ }
+          - { cc: clang, cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        # mithril links only pthreads (its own DEFLATE, no codec libs) and the
+        # integration tests are self-contained, so no filesystem/codec packages.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ clang python3
+      - name: Build + run the suite
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: bash tests/run.sh
+
+  sanitizers:
+    name: asan + ubsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake clang python3
+      - name: Build + run the suite under ASan/UBSan
+        env:
+          CC: clang
+          CXX: clang++
+          EXTRA_CMAKE: -DMT_SANITIZE=ON
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: bash tests/run.sh
+
+  fuzz-smoke:
+    name: fuzz smoke (60s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+      - name: Build the libFuzzer target
+        run: bash fuzz/build.sh
+      - name: Fuzz 60s
+        run: |
+          mkdir -p fuzz/corpus
+          ./fuzz/fuzz_secrets -max_total_time=60 -rss_limit_mb=4096 fuzz/corpus
