@@ -7,7 +7,9 @@ cd "$(dirname "$0")/.."
 BUILD=${BUILD:-build}
 
 echo "== configure + build =="
-cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null
+# EXTRA_CMAKE lets CI run the whole suite under sanitizers (EXTRA_CMAKE=-DMT_SANITIZE=ON)
+# without duplicating the test list here.
+cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release ${EXTRA_CMAKE:-} >/dev/null
 cmake --build "$BUILD" -j >/dev/null
 
 echo "== unit tests =="
