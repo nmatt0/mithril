@@ -47,6 +47,11 @@ def kernel_cves(binary, root, env):
     return {k["cve"]: k for k in json.loads(out).get("kernel_cves", [])}
 
 
+def report(binary, root, env):
+    out = subprocess.check_output([binary, "-j", "--cve", root], stderr=subprocess.DEVNULL, env=env)
+    return json.loads(out)
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "mithril")
     if not os.path.exists(binary):
@@ -133,9 +138,39 @@ def main():
             print("FAIL(2): --dump-kconfig should fail when no .config was recovered")
             fails += 1
 
+    # --- Case 3: a kernel newer than every curated entry still surfaces ---
+    # The curated table is high-signal, not exhaustive; a modern kernel outruns it.
+    # The kernel must still be reported (version detected, an honest "0 of N in
+    # range"), never silently dropped, and kernel_cve_scan must flag it non-exhaustive.
+    with tempfile.TemporaryDirectory() as d:
+        newbanner = (b"Linux version 6.99.0 (builder@host) (gcc version 14.0.0) "
+                     b"#0 SMP Thu Jan 1 00:00:00 UTC 2026\n")
+        with open(os.path.join(d, "vmlinuz"), "wb") as f:
+            f.write(newbanner + os.urandom(4096))
+        rep = report(binary, d, env)
+        if rep.get("kernel_version") != "6.99.0":
+            print(f"FAIL(3): kernel version not detected: {rep.get('kernel_version')}")
+            fails += 1
+        if rep.get("kernel_cves"):  # out of range for every curated entry
+            print(f"FAIL(3): expected no in-range curated CVEs, got {len(rep['kernel_cves'])}")
+            fails += 1
+        scan = rep.get("kernel_cve_scan", {})
+        if scan.get("exhaustive") is not False or scan.get("method") != "curated-checklist":
+            print(f"FAIL(3): kernel_cve_scan metadata missing/wrong: {scan}")
+            fails += 1
+        if scan.get("curated_in_range") != 0 or not scan.get("curated_total", 0) > 0:
+            print(f"FAIL(3): kernel_cve_scan counts wrong: {scan}")
+            fails += 1
+        # Human view must still print a Kernel CVEs line for this kernel (not vanish).
+        human = subprocess.check_output([binary, "--cve", d], stderr=subprocess.DEVNULL,
+                                        env={**env, "NO_COLOR": "1"}).decode()
+        if "Kernel CVEs" not in human or "6.99.0" not in human:
+            print("FAIL(3): human output did not surface the kernel with zero curated hits")
+            fails += 1
+
     if fails == 0:
         print("PASS: .config recovered + authoritative gating; .ko rules subsystem in; "
-              "modular-unknown stays undetermined")
+              "modular-unknown stays undetermined; modern kernel surfaces non-exhaustively")
         return 0
     return 1
 

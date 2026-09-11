@@ -16,6 +16,7 @@
 // confirm the backport", which is exactly the triage an operator wants.
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>
@@ -34,6 +35,9 @@ struct KernelCveResult {
     KcveState state = KcveState::Applicable;
     bool applicable = true;  // == (state == Applicable); kept for existing callers
     std::string reason;      // why applicable/ruled-out/unknown, with the evidence source
+    // Where this result came from: "curated" (the built-in high-signal table) or
+    // "kernel.org" (the full version-matched feed, only with --kernel-cves-all).
+    std::string source = "curated";
     // Value-add annotations (never affect applicability):
     bool kev = false;        // on the CISA Known-Exploited catalog
     double epss = -1.0;      // EPSS exploit-probability (0..1), -1 if unknown
@@ -70,5 +74,10 @@ std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
 // Equivalent to a KernelConfigView{enabled=*enabled, authoritative=true}.
 std::vector<KernelCveResult> kernel_cve_scan(const std::string& kernel_version,
                                              const std::set<std::string>* enabled);
+
+// Number of entries in the curated table. Lets the output report "N of <total>
+// curated checks in range" so an empty result reads as "none of the curated set
+// applies", not "this kernel has no CVEs".
+std::size_t kernel_cve_curated_total();
 
 }  // namespace ft

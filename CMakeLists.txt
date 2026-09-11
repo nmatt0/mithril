@@ -33,6 +33,7 @@ add_executable(mithril
   src/kconfig_infer.cpp
   src/kallsyms.cpp
   src/kernelcve.cpp
+  src/kernelfeed.cpp
   src/langmanifest.cpp
   src/rpm.cpp
   src/version.cpp
@@ -70,6 +71,7 @@ add_executable(mithril_unit
   src/kconfig_infer.cpp
   src/kallsyms.cpp
   src/kernelcve.cpp
+  src/kernelfeed.cpp
   src/langmanifest.cpp
   src/rpm.cpp
   src/version.cpp

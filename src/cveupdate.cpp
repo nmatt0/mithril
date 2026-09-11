@@ -1,5 +1,6 @@
 #include "cveupdate.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
@@ -20,6 +21,7 @@
 #include "inflate.hpp"
 #include "io_util.hpp"
 #include "jsonparse.hpp"
+#include "kernelfeed.hpp"
 #include "osvindex.hpp"
 #include "sha256.hpp"
 #include "strutil.hpp"
@@ -534,6 +536,96 @@ int epss_update(std::string& err) {
     return 0;
 }
 
+// Build the full kernel.org (Linux CNA) CVE feed index from the vulns snapshot.
+// A large, optional asset (only --kernel-cves-all reads it): fetch the cgit
+// tarball, extract with tar, reconstruct one entry per published CVE record,
+// write kernel-cve-index.json. Needs curl + tar.
+int kernel_feed_update(std::string& err) {
+    for (const char* tool : {"curl", "tar"}) {
+        if (!command_on_path(tool)) {
+            err = std::string(tool) +
+                  " not found on PATH; mithril --update-db --with-kernel-feed needs curl and tar";
+            return 1;
+        }
+    }
+    const std::string data_dir = mithril_data_dir();
+    std::error_code ec;
+    fs::create_directories(data_dir, ec);
+    const std::string tmp = data_dir + "/kfeed-tmp";
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp, ec);
+    const std::string tgz = tmp + "/vulns.tar.gz";
+
+    std::fprintf(stderr, "fetching kernel.org vulns snapshot ...\n");
+    int rc = run_argv({"curl", "-sSL", "--fail", "-o", tgz,
+                       "https://git.kernel.org/pub/scm/linux/security/vulns.git/"
+                       "snapshot/vulns-master.tar.gz"});
+    if (rc != 0) {
+        err = "curl failed for the kernel.org vulns snapshot (rc=" + std::to_string(rc) +
+              "; is the network reachable?)";
+        fs::remove_all(tmp, ec);
+        return 1;
+    }
+    // Extract only the published CVE records (cve/published/**/*.json).
+    std::fprintf(stderr, "extracting ...\n");
+    if (run_argv({"tar", "-xzf", tgz, "-C", tmp, "--wildcards", "*/cve/published/*.json"}) != 0) {
+        err = "tar failed to extract the vulns snapshot";
+        fs::remove_all(tmp, ec);
+        return 1;
+    }
+
+    std::vector<KernelFeedEntry> entries;
+    size_t skipped = 0;
+    for (auto it = fs::recursive_directory_iterator(tmp, ec);
+         it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const fs::path& p = it->path();
+        if (p.extension() != ".json") continue;
+        if (p.parent_path().filename() == "kfeed-tmp") continue;  // not a CVE record
+        std::string base = p.filename().string();
+        if (base.rfind("CVE-", 0) != 0) continue;
+        auto body = read_file(p.string());
+        if (!body) { ++skipped; continue; }
+        auto doc = json_parse(*body);
+        if (!doc || !doc->is_object()) { ++skipped; continue; }
+        const JsonValue* containers = doc->find("containers");
+        const JsonValue* cna = containers ? containers->find("cna") : nullptr;
+        if (!cna || !cna->is_object()) { ++skipped; continue; }
+        std::string id = base.substr(0, base.size() - 5);  // strip ".json"
+        KernelFeedEntry e;
+        if (kernel_feed_entry_from_cna(*cna, id, e))
+            entries.push_back(std::move(e));
+        else
+            ++skipped;
+    }
+    fs::remove_all(tmp, ec);
+    if (entries.empty()) {
+        err = "no kernel CVE records parsed from the vulns snapshot";
+        return 1;
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const KernelFeedEntry& a, const KernelFeedEntry& b) { return a.cve < b.cve; });
+
+    std::string out = write_kernel_feed_index(entries, static_cast<uint64_t>(std::time(nullptr)));
+    const std::string staged = kernel_feed_path() + ".new";
+    std::FILE* f = std::fopen(staged.c_str(), "wb");
+    if (!f) {
+        err = "cannot write " + staged;
+        return 1;
+    }
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fclose(f);
+    fs::rename(staged, kernel_feed_path(), ec);
+    if (ec) {
+        err = "cannot install " + kernel_feed_path() + ": " + ec.message();
+        return 1;
+    }
+    std::fprintf(stderr, "wrote %s (%zu kernel CVEs, %zu records skipped)\n",
+                 kernel_feed_path().c_str(), entries.size(), skipped);
+    return 0;
+}
+
 namespace {
 
 // Default location of the prebuilt index (a rolling GitHub release updated by
@@ -580,7 +672,7 @@ std::map<std::string, std::string> parse_sha256sums(const std::string& body) {
 
 }  // namespace
 
-int cve_fetch(std::string& err) {
+int cve_fetch(std::string& err, bool with_kernel_feed) {
     if (!command_on_path("curl")) {
         err = "curl not found on PATH; mithril --fetch-db needs curl";
         return 1;
@@ -613,12 +705,25 @@ int cve_fetch(std::string& err) {
         return 1;
     }
 
-    const std::vector<Asset> assets = {
+    std::vector<Asset> assets = {
         {"osv-index.mdb.gz", osv_index_path(), true},
         {"nvd-index.json", nvd_index_path(), false},
         {"kev.json", kev_index_path(), false},
         {"epss.txt.gz", epss_index_path(), true},
     };
+    // The kernel.org feed is optional and only present on releases built with it.
+    if (with_kernel_feed) {
+        if (sums.find("kernel-cve-index.json.gz") != sums.end())
+            assets.push_back({"kernel-cve-index.json.gz", kernel_feed_path(), true});
+        else if (sums.find("kernel-cve-index.json") != sums.end())
+            assets.push_back({"kernel-cve-index.json", kernel_feed_path(), false});
+        else {
+            err = "--with-kernel-feed: the db release does not carry kernel-cve-index.json "
+                  "(rebuild it with 'mithril --update-db --with-kernel-feed')";
+            fs::remove_all(tmp, ec);
+            return 1;
+        }
+    }
 
     for (const Asset& a : assets) {
         auto it = sums.find(a.served);
@@ -683,7 +788,7 @@ int cve_fetch(std::string& err) {
     return 0;
 }
 
-int cve_update(std::string& err) {
+int cve_update(std::string& err, bool with_kernel_feed) {
     for (const char* tool : {"curl", "unzip"}) {
         if (!command_on_path(tool)) {
             err = std::string(tool) +
@@ -695,6 +800,8 @@ int cve_update(std::string& err) {
     if (int rc = nvd_update(err)) return rc;
     if (int rc = kev_update(err)) return rc;
     if (int rc = epss_update(err)) return rc;
+    if (with_kernel_feed)
+        if (int rc = kernel_feed_update(err)) return rc;
     return 0;
 }
 

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -18,6 +19,7 @@
 #include "cveupdate.hpp"
 #include "dbpath.hpp"
 #include "kernelcve.hpp"
+#include "kernelfeed.hpp"
 #include "human.hpp"
 #include "json.hpp"
 #include "report.hpp"
@@ -51,9 +53,12 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --cve           Match components against known vulnerabilities\n"
                  "      --licenses      Identify open-source licenses\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
+                 "      --kernel-cves-all  List every CVE for the detected kernel version, not\n"
+                 "                         just the curated set (needs the kernel feed; implies --cve)\n"
                  "      --rules <FILE>  Add user-defined rules from a JSON file\n"
                  "      --fetch-db      Download a prebuilt CVE mirror, then exit\n"
                  "      --update-db     Rebuild the local CVE mirror from source, then exit\n"
+                 "      --with-kernel-feed  With --fetch-db/--update-db, also get the kernel feed\n"
                  "  -C, --outdir <DIR>  Write the JSON report to DIR/mithril-report.json\n"
                  "      --dump-kconfig  Print the recovered kernel .config to stdout, then exit\n"
                  "      --threads <N>   Worker threads for tree scans (default: auto)\n"
@@ -83,6 +88,8 @@ int main(int argc, char** argv) {
     bool update_db = false;
     bool fetch_db = false;
     bool dump_kconfig = false;
+    bool kernel_cves_all = false;
+    bool with_kernel_feed = false;
     Passes passes;
     bool have_path = false;
     bool end_of_opts = false;
@@ -125,6 +132,10 @@ int main(int argc, char** argv) {
             fetch_db = true;
         } else if (!end_of_opts && std::strcmp(a, "--dump-kconfig") == 0) {
             dump_kconfig = true;
+        } else if (!end_of_opts && std::strcmp(a, "--kernel-cves-all") == 0) {
+            kernel_cves_all = true;
+        } else if (!end_of_opts && std::strcmp(a, "--with-kernel-feed") == 0) {
+            with_kernel_feed = true;
         } else if (!end_of_opts && std::strcmp(a, "--rules") == 0 && i + 1 < argc) {
             rules_cli = argv[++i];
         } else if (!end_of_opts && std::strcmp(a, "--threads") == 0 && i + 1 < argc) {
@@ -147,7 +158,8 @@ int main(int argc, char** argv) {
     if (update_db || fetch_db) {
         std::string err;
         const char* action = update_db ? "--update-db" : "--fetch-db";
-        int rc = update_db ? cve_update(err) : cve_fetch(err);
+        int rc = update_db ? cve_update(err, with_kernel_feed)
+                           : cve_fetch(err, with_kernel_feed);
         if (rc != 0) {
             std::fprintf(stderr, "%s: %s: %s\n", prog, action, err.c_str());
             return 1;
@@ -164,6 +176,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s: no such file or directory: %s\n", prog, path.c_str());
         return 1;
     }
+
+    // --kernel-cves-all is a CVE-pass feature; make sure that pass runs.
+    if (kernel_cves_all) passes.cve = true;
 
     // No pass selected -> run them all (like a bare `mithril <tree>`).
     if (!passes.any()) passes.all();
@@ -245,6 +260,27 @@ int main(int argc, char** argv) {
         // Curated kernel-CVE checklist, gated by version + kconfig (independent of
         // the OSV/NVD mirror — the table is built in).
         rep.kernel_cves = kernel_cve_scan(rep.kernel_version, &rep.kcv);
+
+        // --kernel-cves-all: also join the full kernel.org (Linux CNA) feed, the
+        // complete version-matched set. Merged in, deduped against the curated
+        // entries (which keep their kconfig gating and exploit notes). Feed entries
+        // are version-matched only (the feed carries no CONFIG data), so they are
+        // not gated. Absent feed -> a loud, actionable message, not silence.
+        if (kernel_cves_all && !rep.kernel_version.empty()) {
+            auto feed = load_kernel_feed(kernel_feed_path());
+            if (!feed) {
+                std::string msg = std::string("--kernel-cves-all: no kernel CVE feed; run '") +
+                                  prog + " --fetch-db --with-kernel-feed' first";
+                rep.errors.emplace_back(std::string(), msg);
+                std::fprintf(stderr, "%s: %s\n", prog, msg.c_str());
+            } else {
+                rep.kernel_cves_full = true;
+                std::set<std::string> have;
+                for (const auto& k : rep.kernel_cves) have.insert(k.cve);
+                for (auto& fr : kernel_feed_scan(rep.kernel_version, *feed))
+                    if (have.insert(fr.cve).second) rep.kernel_cves.push_back(std::move(fr));
+            }
+        }
 
         // Value-add annotation only (never affects applicability): tag findings
         // that are on CISA KEV or carry an EPSS score.

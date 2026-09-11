@@ -206,6 +206,7 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             kv_bool(o, "applicable", k.applicable, kf);
             kv_str(o, "reason", k.reason, kf);
             kv_str(o, "note", k.note, kf);
+            kv_str(o, "source", k.source, kf);  // "curated" or "kernel.org"
             if (k.kev) kv_bool(o, "kev", true, kf);
             if (k.epss >= 0) {
                 char b[16];
@@ -218,6 +219,42 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             o += "}";
         }
         o += "]";
+
+        // Metadata that makes the curated, non-exhaustive nature of the kernel
+        // scan machine-readable: an empty "kernel_cves" means "none of the curated
+        // set is in range", not "this kernel has no known CVEs". LLM/tool callers
+        // read this rather than inferring exhaustiveness from the array length.
+        if (!rep.kernel_version.empty()) {
+            // Curated (kconfig-gated) and feed (kernel.org, version-matched) are
+            // counted separately; the curated summary is not diluted by the feed.
+            size_t kapp = 0, kunk = 0, kruled = 0, cur = 0, feed = 0;
+            for (const auto& k : rep.kernel_cves) {
+                if (k.source == "kernel.org") { ++feed; continue; }
+                ++cur;
+                if (k.state == KcveState::Applicable) ++kapp;
+                else if (k.state == KcveState::Unknown) ++kunk;
+                else ++kruled;
+            }
+            o += ",\"kernel_cve_scan\":{";
+            bool sf = true;
+            kv_str(o, "method", rep.kernel_cves_full ? "curated+kernel.org" : "curated-checklist", sf);
+            // The full kernel.org feed IS a complete version-matched enumeration.
+            kv_bool(o, "exhaustive", rep.kernel_cves_full, sf);
+            kv_num(o, "curated_total", kernel_cve_curated_total(), sf);
+            kv_num(o, "curated_in_range", cur, sf);
+            kv_num(o, "applicable", kapp, sf);
+            kv_num(o, "undetermined", kunk, sf);
+            kv_num(o, "ruled_out", kruled, sf);
+            if (rep.kernel_cves_full) kv_num(o, "feed_in_range", feed, sf);
+            kv_str(o, "note",
+                   rep.kernel_cves_full
+                       ? "curated entries are kconfig-gated; feed entries (source "
+                         "\"kernel.org\") are version-matched, confirm the backport"
+                       : "curated high-signal set of widely-exploited kernel bugs, not every "
+                         "CVE affecting this version; run --kernel-cves-all for the full feed",
+                   sf);
+            o += "}";
+        }
 
         // Structured config evidence behind the kernel-CVE gating: source, whether
         // a verbatim .config was recovered, hardening posture, and the per-option

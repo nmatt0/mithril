@@ -17,5 +17,6 @@ std::string osv_index_path() { return mithril_data_dir() + "/osv-index.mdb"; }
 std::string nvd_index_path() { return mithril_data_dir() + "/nvd-index.json"; }
 std::string kev_index_path() { return mithril_data_dir() + "/kev.json"; }
 std::string epss_index_path() { return mithril_data_dir() + "/epss.txt"; }
+std::string kernel_feed_path() { return mithril_data_dir() + "/kernel-cve-index.json"; }
 
 }  // namespace ft

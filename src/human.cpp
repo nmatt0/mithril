@@ -199,26 +199,56 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
     }
 
     // ---- curated kernel CVEs (applicable, undetermined, then ruled-out) ----
-    if (passes.cve && !rep.kernel_cves.empty()) {
+    // Printed whenever a kernel version was detected, even with zero in-range
+    // curated hits: the curated list is a high-signal set, not an exhaustive one,
+    // so a modern kernel that outruns the table must still show a line rather than
+    // vanish (which reads as "mithril did not see the kernel").
+    if (passes.cve && !rep.kernel_version.empty()) {
         o += "\n";
-        size_t app = 0, unk = 0, ruled = 0;
+        o += a.bold();
+        o += "Kernel CVEs";
+        o += a.reset();
+        o += a.dim();
+        o += rep.kernel_cves_full ? "  (curated high-signal set + full kernel.org feed)"
+                                  : "  (curated high-signal checklist, not a full CVE list)";
+        o += a.reset();
+        o += "\n\n  ";
+        // Curated (built-in, kconfig-gated) and feed (kernel.org, version-matched)
+        // are counted and shown separately: the curated summary must not be diluted
+        // by the feed's version-only matches.
+        auto is_feed = [](const KernelCveResult& k) { return k.source == "kernel.org"; };
+        size_t app = 0, unk = 0, ruled = 0, cur_total = 0;
+        size_t feed_n = 0, feed_broad = 0;
         for (const auto& k : rep.kernel_cves) {
+            if (is_feed(k)) {
+                ++feed_n;
+                if (k.reason.find("verify backport") != std::string::npos) ++feed_broad;
+                continue;
+            }
+            ++cur_total;
             if (k.state == KcveState::Applicable) ++app;
             else if (k.state == KcveState::Unknown) ++unk;
             else ++ruled;
         }
-        o += a.bold();
-        o += std::to_string(app);
-        o += " applicable kernel CVE";
-        o += app == 1 ? "" : "s";
-        o += a.reset();
-        o += " (of " + std::to_string(rep.kernel_cves.size()) + " in range for " +
-             rep.kernel_version + ")";
-        if (unk || ruled) {
+        if (cur_total == 0) {
             o += a.dim();
-            o += "  [" + std::to_string(ruled) + " ruled out, " + std::to_string(unk) +
-                 " undetermined]";
+            o += "kernel " + rep.kernel_version + " detected; 0 of " +
+                 std::to_string(kernel_cve_curated_total()) +
+                 " curated checks in range for this version";
             o += a.reset();
+        } else {
+            o += a.bold();
+            o += std::to_string(app);
+            o += a.reset();
+            o += " applicable of " + std::to_string(cur_total) +
+                 " curated check" + (cur_total == 1 ? "" : "s") +
+                 " in range for " + rep.kernel_version;
+            if (unk || ruled) {
+                o += a.dim();
+                o += "  [" + std::to_string(ruled) + " ruled out, " + std::to_string(unk) +
+                     " undetermined]";
+                o += a.reset();
+            }
         }
         // Config posture: how we learned the config, plus the hardening flags,
         // color-coded green=good / yellow=warn / red=bad / (default)=info.
@@ -247,9 +277,10 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
         }
         o += "\n\n";
         size_t wcve = 3;
-        for (const auto& k : rep.kernel_cves) wcve = std::max(wcve, k.cve.size());
+        for (const auto& k : rep.kernel_cves)
+            if (!is_feed(k)) wcve = std::max(wcve, k.cve.size());
         for (const auto& k : rep.kernel_cves) {
-            if (k.state != KcveState::Applicable) continue;
+            if (is_feed(k) || k.state != KcveState::Applicable) continue;
             o += "  ";
             o += a.red();  // applicable == exploitable attack surface -> bad
             pad(o, k.cve, wcve);
@@ -279,7 +310,7 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
             o += a.reset();
             o += "\n";
             for (const auto& k : rep.kernel_cves) {
-                if (k.state != KcveState::Unknown) continue;
+                if (is_feed(k) || k.state != KcveState::Unknown) continue;
                 o += "    ";
                 o += a.dim();
                 pad(o, k.cve, wcve);
@@ -296,7 +327,7 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
             o += a.reset();
             o += "\n";
             for (const auto& k : rep.kernel_cves) {
-                if (k.state != KcveState::RuledOut) continue;
+                if (is_feed(k) || k.state != KcveState::RuledOut) continue;
                 o += "    ";
                 o += a.green();  // ruled out == surface removed -> good
                 pad(o, k.cve, wcve);
@@ -307,6 +338,64 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 o += "\n";
             }
         }
+        // --kernel-cves-all: the full kernel.org feed, version-matched. Can be
+        // hundreds of lines, so cap the human list and point at -j for the rest.
+        if (rep.kernel_cves_full) {
+            o += "\n";
+            o += a.bold();
+            o += "  kernel.org feed";
+            o += a.reset();
+            o += a.dim();
+            o += "  " + std::to_string(feed_n) + " CVE" + (feed_n == 1 ? "" : "s") +
+                 " in range for " + rep.kernel_version;
+            if (feed_broad)
+                o += " (" + std::to_string(feed_broad) + " broad-range, verify backport)";
+            o += " — not kconfig-gated";
+            o += a.reset();
+            o += "\n";
+            constexpr size_t kCap = 40;
+            size_t shown = 0, wid = 3;
+            for (const auto& k : rep.kernel_cves)
+                if (is_feed(k)) wid = std::max(wid, k.cve.size());
+            for (const auto& k : rep.kernel_cves) {
+                if (!is_feed(k)) continue;
+                if (shown++ >= kCap) continue;
+                o += "    ";
+                o += a.dim();
+                pad(o, k.cve, wid);
+                o += a.reset();
+                if (!k.impact.empty()) o += "  " + k.impact;  // CVSS severity
+                if (!k.note.empty()) o += "  " + k.note;
+                if (k.kev) {
+                    o += a.red();
+                    o += " [KEV]";
+                    o += a.reset();
+                }
+                if (k.epss >= 0.10) {
+                    char b[24];
+                    std::snprintf(b, sizeof(b), " epss=%.2f", k.epss);
+                    o += b;
+                }
+                o += "\n";
+            }
+            if (feed_n > kCap) {
+                o += a.dim();
+                o += "    ... and " + std::to_string(feed_n - kCap) +
+                     " more (use -j for the complete list)";
+                o += a.reset();
+                o += "\n";
+            }
+        }
+        // Say what the curated set is, and where the complete list lives, so a short
+        // or empty result is never read as exhaustive.
+        o += "\n";
+        o += a.dim();
+        o += rep.kernel_cves_full
+                 ? "  Curated entries are kconfig-gated; feed entries are version-matched "
+                   "(confirm the backport)."
+                 : "  Curated high-signal set. Run --kernel-cves-all for every kernel CVE in range.";
+        o += a.reset();
+        o += "\n";
     }
 
     // ---- kernel hardening (its own section; only from a recovered .config) ----
