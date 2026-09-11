@@ -309,26 +309,28 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
     }
 
     if (passes.licenses) {
-        // Aggregate by license id: count + an example path + best tier.
-        struct Agg { size_t count = 0; std::string example, tier; uint8_t conf = 0; };
+        // Aggregate by license id: count + every distinct file path + best tier.
+        // JSON is the machine view, so it always carries the complete path list
+        // (the human --license-paths flag does not gate this).
+        struct Agg { std::vector<std::string> paths; std::string tier; uint8_t conf = 0; };
         std::vector<std::pair<std::string, Agg>> agg;
         for (const auto& h : rep.licenses) {
             auto it = std::find_if(agg.begin(), agg.end(),
                                    [&](const auto& p) { return p.first == h.finding.type; });
             if (it == agg.end()) {
-                agg.push_back({h.finding.type, {1, h.path, h.finding.confidence_tier,
-                                                h.finding.confidence}});
+                agg.push_back({h.finding.type,
+                               {{h.path}, h.finding.confidence_tier, h.finding.confidence}});
             } else {
-                it->second.count++;
+                it->second.paths.push_back(h.path);
                 if (h.finding.confidence > it->second.conf) {
                     it->second.conf = h.finding.confidence;
                     it->second.tier = h.finding.confidence_tier;
-                    it->second.example = h.path;
                 }
             }
         }
         std::sort(agg.begin(), agg.end(), [](const auto& a, const auto& b) {
-            if (a.second.count != b.second.count) return a.second.count > b.second.count;
+            if (a.second.paths.size() != b.second.paths.size())
+                return a.second.paths.size() > b.second.paths.size();
             return a.first < b.first;
         });
         o += ",\"licenses\":[";
@@ -337,10 +339,16 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             o += "{";
             bool first = true;
             kv_str(o, "license", agg[i].first, first);
-            kv_num(o, "count", agg[i].second.count, first);
+            kv_num(o, "count", agg[i].second.paths.size(), first);
             kv_str(o, "confidence_tier", agg[i].second.tier, first);
-            kv_str(o, "example_path", agg[i].second.example, first);
-            o += "}";
+            o += ",\"paths\":[";
+            for (size_t p = 0; p < agg[i].second.paths.size(); ++p) {
+                if (p) o += ",";
+                o += "\"";
+                json_escape(o, agg[i].second.paths[p]);
+                o += "\"";
+            }
+            o += "]}";
         }
         o += "]";
     }
