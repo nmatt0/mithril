@@ -15,6 +15,7 @@
 #include "binver.hpp"
 #include "component.hpp"
 #include "credstore.hpp"
+#include "derkey.hpp"
 #include "cve.hpp"
 #include "osvindex.hpp"
 #include "sha256.hpp"
@@ -1276,6 +1277,79 @@ static void test_sha256() {
           "7ce100971f64e7001e8fe5a51973ecdfe1ced42befe7ee8d5fd6219506b5393c");
 }
 
+// ---- DER private-key scanner --------------------------------------------
+// kEcSec1: a real EC secp256r1 key in traditional SEC1 form (RFC 5915), DER.
+static const uint8_t kEcSec1[] = {
+    0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20, 0xE1, 0x2B, 0xF9, 0x74, 0x95,
+    0xFD, 0xA2, 0xFD, 0xA6, 0x18, 0x64, 0x56, 0x8D, 0xBE, 0xE4, 0xBF, 0x50,
+    0x6F, 0x83, 0xC7, 0x7E, 0xDF, 0x25, 0xA6, 0x82, 0x32, 0x1B, 0xF6, 0x33,
+    0x33, 0xB0, 0x93, 0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D,
+    0x03, 0x01, 0x07, 0xA1, 0x44, 0x03, 0x42, 0x00, 0x04, 0x4B, 0xC0, 0xE5,
+    0x07, 0x22, 0x56, 0xD9, 0xFD, 0x48, 0x45, 0xD2, 0x41, 0x76, 0x9B, 0x5D,
+    0x95, 0x2B, 0xFE, 0x74, 0x8D, 0xCB, 0xA9, 0x32, 0x11, 0x55, 0xEB, 0xC5,
+    0x7C, 0x73, 0xAE, 0x71, 0x1F, 0x44, 0x1C, 0x1F, 0xA9, 0x1F, 0x69, 0xC7,
+    0xC1, 0xE4, 0x3E, 0x4B, 0x7B, 0x0A, 0x21, 0x60, 0x49, 0x2D, 0x63, 0x97,
+    0x3C, 0x53, 0xDF, 0x8B, 0xBA, 0xA0, 0x78, 0x30, 0x2A, 0x20, 0xAD, 0xE4,
+    0xEB,
+};
+// kEd25519: a real Ed25519 key in PKCS#8 form (RFC 8410), DER.
+static const uint8_t kEd25519[] = {
+    0x30, 0x2E, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70,
+    0x04, 0x22, 0x04, 0x20, 0x73, 0xF1, 0x33, 0xEE, 0xEF, 0x15, 0x41, 0x6C,
+    0x69, 0xA8, 0xDC, 0x27, 0x70, 0x58, 0x81, 0x24, 0x06, 0x48, 0x2D, 0xEB,
+    0x81, 0x53, 0x21, 0x9A, 0xAE, 0x68, 0xFD, 0x35, 0x12, 0x89, 0x1D, 0x6C,
+};
+
+static void test_derkey() {
+    // Two real DER keys embedded in binary padding, no PEM wrapper — exactly the
+    // shape the text-anchored engine misses.
+    std::vector<uint8_t> buf;
+    auto pad = [&](size_t n) { for (size_t i = 0; i < n; ++i) buf.push_back(uint8_t(i * 7 + 1)); };
+    pad(500);
+    size_t ec_off = buf.size();
+    buf.insert(buf.end(), std::begin(kEcSec1), std::end(kEcSec1));
+    pad(300);
+    size_t ed_off = buf.size();
+    buf.insert(buf.end(), std::begin(kEd25519), std::end(kEd25519));
+    pad(500);
+
+    ft::Reader r(buf);
+    auto keys = ft::scan_der_private_keys(r);
+    CHECK(keys.size() == 2);
+    bool ec_ok = false, ed_ok = false;
+    for (const auto& k : keys) {
+        CHECK(k.type == "der-private-key");
+        CHECK(k.category == "secret");
+        CHECK(k.confidence == static_cast<uint8_t>(ft::Confidence::Structural));
+        if (k.offset == ec_off && k.size == sizeof(kEcSec1) && k.label == "EC secp256r1 private key")
+            ec_ok = true;
+        if (k.offset == ed_off && k.size == sizeof(kEd25519) && k.label == "Ed25519 private key")
+            ed_ok = true;
+    }
+    CHECK(ec_ok);
+    CHECK(ed_ok);
+
+    // Negatives: key-ish class names and a lone version+SEQUENCE run must not fire.
+    {
+        std::string s = "org.bouncycastle.crypto.params.RSAPrivateKeyStructure loadPrivateKey";
+        std::vector<uint8_t> n(s.begin(), s.end());
+        ft::Reader nr(n);
+        CHECK(ft::scan_der_private_keys(nr).empty());
+    }
+    {
+        // The PKCS#8 anchor bytes but no valid key structure after them.
+        std::vector<uint8_t> n = {0x00, 0x02, 0x01, 0x00, 0x30, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+        ft::Reader nr(n);
+        CHECK(ft::scan_der_private_keys(nr).empty());
+    }
+    // Truncated key (last 5 bytes cut) must not match and must not crash.
+    {
+        std::vector<uint8_t> t(std::begin(kEcSec1), std::end(kEcSec1) - 5);
+        ft::Reader tr(t);
+        CHECK(ft::scan_der_private_keys(tr).empty());
+    }
+}
+
 int main() {
     test_ahocorasick();
     test_entropy();
@@ -1286,6 +1360,7 @@ int main() {
     test_validators_github_crc();
     test_validators_jwt();
     test_validators_pem();
+    test_derkey();
     test_glob();
     test_path_rules();
     test_metadata();

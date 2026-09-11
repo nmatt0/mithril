@@ -16,6 +16,9 @@ echo "== unit tests =="
 echo "== integration: secrets =="
 python3 tests/test_secrets.py "./$BUILD/mithril"
 
+echo "== integration: der private keys =="
+python3 tests/test_der_keys.py "./$BUILD/mithril"
+
 echo "== integration: sbom =="
 python3 tests/test_sbom.py "./$BUILD/mithril"
 
