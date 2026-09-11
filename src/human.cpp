@@ -41,7 +41,7 @@ std::string clip(const std::string& s, size_t w) {
 }  // namespace
 
 std::string emit_report_human(const Report& rep, const Passes& passes, const std::string& footer,
-                              bool color) {
+                              bool color, bool license_paths) {
     Ansi a{color};
     std::string o;
 
@@ -435,35 +435,76 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
     // ---- licenses (aggregated by id) ----
     if (passes.licenses) {
         if (passes.secrets || passes.sbom || passes.cve) o += "\n";
-        std::vector<std::pair<std::string, size_t>> agg;  // id -> count, first-seen order
+        // Group findings by license id, preserving first-seen order; each group
+        // keeps its file paths so --license-paths can list them.
+        std::vector<std::pair<std::string, std::vector<std::string>>> groups;
         for (const auto& h : rep.licenses) {
-            auto it = std::find_if(agg.begin(), agg.end(),
-                                   [&](const auto& p) { return p.first == h.finding.type; });
-            if (it == agg.end()) agg.push_back({h.finding.type, 1});
-            else it->second++;
+            auto it = std::find_if(groups.begin(), groups.end(),
+                                   [&](const auto& g) { return g.first == h.finding.type; });
+            if (it == groups.end()) groups.push_back({h.finding.type, {h.path}});
+            else it->second.push_back(h.path);
         }
-        std::sort(agg.begin(), agg.end(), [](const auto& a, const auto& b) {
-            if (a.second != b.second) return a.second > b.second;
-            return a.first < b.first;
+        std::sort(groups.begin(), groups.end(), [](const auto& x, const auto& y) {
+            if (x.second.size() != y.second.size()) return x.second.size() > y.second.size();
+            return x.first < y.first;
         });
         o += a.bold();
-        o += std::to_string(agg.size());
-        o += agg.size() == 1 ? " license" : " licenses";
+        o += std::to_string(groups.size());
+        o += groups.size() == 1 ? " license" : " licenses";
         o += a.reset();
         o += "\n";
-        if (!agg.empty()) {
+        if (!groups.empty()) {
             size_t wid = 7;
-            for (const auto& p : agg) wid = std::max(wid, p.first.size());
-            wid = std::min<size_t>(wid, 24);
+            for (const auto& g : groups) wid = std::max(wid, g.first.size());
+            // SPDX ids are short and bounded, and compound expressions ("A OR B",
+            // "A WITH exception") carry meaning in the leading term that a tight
+            // clip would drop. Allow a wide column (fits every realistic id) so
+            // the cap only ever guards against a degenerate value.
+            wid = std::min<size_t>(wid, 48);
             o += "\n";
-            for (const auto& p : agg) {
-                o += "  ";
-                o += a.cyan();
-                pad(o, clip(p.first, wid), wid);
-                o += a.reset();
-                o += "  ";
+            if (license_paths) {
+                // Detail view: one row per (license, file), grouped by id, in the
+                // notable-files layout. A single very common license is capped;
+                // -j always carries the complete set.
+                constexpr size_t kCap = 20;
+                for (const auto& g : groups) {
+                    size_t shown = std::min(g.second.size(), kCap);
+                    for (size_t i = 0; i < shown; ++i) {
+                        o += "  ";
+                        o += a.cyan();
+                        pad(o, clip(g.first, wid), wid);
+                        o += a.reset();
+                        o += "  ";
+                        o += g.second[i];
+                        o += "\n";
+                    }
+                    if (g.second.size() > kCap) {
+                        o += "  ";
+                        for (size_t i = 0; i < wid; ++i) o += ' ';  // align under the paths
+                        o += "  ";
+                        o += a.dim();
+                        o += "... and " + std::to_string(g.second.size() - kCap) +
+                             " more (use -j for the complete list)";
+                        o += a.reset();
+                        o += "\n";
+                    }
+                }
+            } else {
+                // Summary view (default): id + count.
+                for (const auto& g : groups) {
+                    o += "  ";
+                    o += a.cyan();
+                    pad(o, clip(g.first, wid), wid);
+                    o += a.reset();
+                    o += "  ";
+                    o += a.dim();
+                    o += "x" + std::to_string(g.second.size());
+                    o += a.reset();
+                    o += "\n";
+                }
+                o += "\n";
                 o += a.dim();
-                o += "x" + std::to_string(p.second);
+                o += "  Run --license-paths to show where each license was found.";
                 o += a.reset();
                 o += "\n";
             }

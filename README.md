@@ -45,6 +45,7 @@ mithril --sbom -C out/ <dir>  # SBOM only -> out/sbom.cdx.json + out/sbom.spdx.j
 mithril --cve <dir>           # match components against the local mirror (offline)
 mithril --cve --kernel-cves-all <dir>  # also list every kernel.org CVE for the kernel version (opt-in)
 mithril --licenses <dir>      # licenses only
+mithril --license-paths <dir> # licenses, with each license's file locations listed
 mithril --rules my.json <dir> # add user-defined rules (docs/user-rules.md)
 mithril --fetch-db            # FIRST RUN: download the CVE mirror (a networked command)
 mithril --fetch-db --with-kernel-feed  # also fetch the optional full kernel.org CVE feed
@@ -72,7 +73,7 @@ Build it once either way; every scan after that is offline. See `docs/cve-join.m
 - **secrets**: credential and key material in file content (cloud keys, tokens, JWTs, private keys, high-entropy `KEY=…` values). `/etc/shadow` and `htpasswd` hashes are classified with weak-algorithm and empty-password flags, and credential/crypto/config files are flagged by path.
 - **sbom**: components and versions from package databases, language manifests, binary version strings, libc filenames, and the kernel banner, keyed on purl (with CPE co-derived), emitted as CycloneDX and SPDX.
 - **cve**: the SBOM joined against the local OSV + NVD/CPE mirror, plus the curated kernel-CVE checklist, annotated with KEV and EPSS.
-- **licenses**: SPDX identification from `SPDX-License-Identifier` tags and LICENSE/COPYING/NOTICE text.
+- **licenses**: SPDX identification from `SPDX-License-Identifier` tags and LICENSE/COPYING/NOTICE text. Human output summarizes by id and count; `--license-paths` lists each license's file locations, and JSON always carries the full `paths` array.
 
 File-type identification, extraction, and embedded key/certificate *file* signatures are moria's job; mithril reads content, it does not unpack. How discovery works is documented in `docs/engine-design.md`.
 

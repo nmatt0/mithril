@@ -52,6 +52,8 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --sbom          Inventory software components and versions\n"
                  "      --cve           Match components against known vulnerabilities\n"
                  "      --licenses      Identify open-source licenses\n"
+                 "      --license-paths  List the file locations of each license, not just\n"
+                 "                       a count (human output; implies --licenses)\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
                  "      --kernel-cves-all  List every CVE for the detected kernel version, not\n"
                  "                         just the curated set (needs the kernel feed; implies --cve)\n"
@@ -89,6 +91,7 @@ int main(int argc, char** argv) {
     bool fetch_db = false;
     bool dump_kconfig = false;
     bool kernel_cves_all = false;
+    bool license_paths = false;
     bool with_kernel_feed = false;
     Passes passes;
     bool have_path = false;
@@ -134,6 +137,8 @@ int main(int argc, char** argv) {
             dump_kconfig = true;
         } else if (!end_of_opts && std::strcmp(a, "--kernel-cves-all") == 0) {
             kernel_cves_all = true;
+        } else if (!end_of_opts && std::strcmp(a, "--license-paths") == 0) {
+            license_paths = true;
         } else if (!end_of_opts && std::strcmp(a, "--with-kernel-feed") == 0) {
             with_kernel_feed = true;
         } else if (!end_of_opts && std::strcmp(a, "--rules") == 0 && i + 1 < argc) {
@@ -179,6 +184,8 @@ int main(int argc, char** argv) {
 
     // --kernel-cves-all is a CVE-pass feature; make sure that pass runs.
     if (kernel_cves_all) passes.cve = true;
+    // --license-paths expands the license section; make sure that pass runs.
+    if (license_paths) passes.licenses = true;
 
     // No pass selected -> run them all (like a bare `mithril <tree>`).
     if (!passes.any()) passes.all();
@@ -337,7 +344,7 @@ int main(int argc, char** argv) {
         std::snprintf(foot, sizeof(foot), "Scanned %zu file%s (%zu bytes) in %.3f s",
                       rep.file_count, rep.file_count == 1 ? "" : "s", rep.bytes_scanned, secs);
         bool color = isatty(fileno(stdout)) && !std::getenv("NO_COLOR");
-        std::string h = emit_report_human(rep, impl, foot, color);
+        std::string h = emit_report_human(rep, impl, foot, color, license_paths);
         std::fwrite(h.data(), 1, h.size(), stdout);
     }
 
