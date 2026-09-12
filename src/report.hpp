@@ -57,6 +57,7 @@ struct Report {
     std::vector<CveMatch> cves;         // SBOM-vs-OSV join results
     std::vector<KernelCveResult> kernel_cves;  // curated checklist (+ feed if --kernel-cves-all)
     bool kernel_cves_full = false;      // --kernel-cves-all: the kernel.org feed was merged in
+    bool component_cves_all = false;    // --component-cves-all: show every component CVE in human view
     std::vector<Hit> licenses;          // license findings (SPDX tags + license files)
 
     // Files that could not be read (path -> reason), surfaced for honesty.

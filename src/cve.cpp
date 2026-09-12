@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <string_view>
 
@@ -140,6 +141,111 @@ int cvss_rank(const std::string& v) {
     return 0;
 }
 }  // namespace
+
+// One base-metric value char from any CVSS vector, v2 ("AV:N/AC:L/Au:N/...") or
+// v3.x ("CVSS:3.1/AV:N/..."); the leading "CVSS:3.x" token is skipped naturally
+// since we never query the "CVSS" key. Returns 0 if the metric is absent.
+static char cvss_metric(const std::string& v, std::string_view key) {
+    size_t i = 0;
+    while (i < v.size()) {
+        size_t slash = v.find('/', i);
+        std::string_view tok(v.data() + i, (slash == std::string::npos ? v.size() : slash) - i);
+        size_t colon = tok.find(':');
+        if (colon != std::string_view::npos && colon + 1 < tok.size() && tok.substr(0, colon) == key)
+            return tok[colon + 1];
+        if (slash == std::string::npos) break;
+        i = slash + 1;
+    }
+    return 0;
+}
+
+// CVSS v3.0/v3.1 base score (spec arithmetic). v3.0 uses the same weights and an
+// equivalent roundup for our purposes. Returns -1.0 on an incomplete vector.
+static double cvss3_base_score(const std::string& vector) {
+    char AV = cvss_metric(vector, "AV"), AC = cvss_metric(vector, "AC");
+    char PR = cvss_metric(vector, "PR"), UI = cvss_metric(vector, "UI");
+    char S = cvss_metric(vector, "S"), C = cvss_metric(vector, "C");
+    char I = cvss_metric(vector, "I"), A = cvss_metric(vector, "A");
+    if (!AV || !AC || !PR || !UI || !S || !C || !I || !A) return -1.0;
+    const bool changed = (S == 'C');
+    double av = AV == 'N' ? 0.85 : AV == 'A' ? 0.62 : AV == 'L' ? 0.55 : AV == 'P' ? 0.20 : -1;
+    double ac = AC == 'L' ? 0.77 : AC == 'H' ? 0.44 : -1.0;
+    double pr = PR == 'N' ? 0.85
+                : PR == 'L' ? (changed ? 0.68 : 0.62)
+                : PR == 'H' ? (changed ? 0.50 : 0.27) : -1.0;
+    double ui = UI == 'N' ? 0.85 : UI == 'R' ? 0.62 : -1.0;
+    auto cia = [](char m) -> double {
+        switch (m) { case 'H': return 0.56; case 'L': return 0.22; case 'N': return 0.0;
+                     default: return -1; }
+    };
+    double c = cia(C), ii = cia(I), a = cia(A);
+    if (av < 0 || ac < 0 || pr < 0 || ui < 0 || c < 0 || ii < 0 || a < 0) return -1.0;
+    double iss = 1.0 - (1.0 - c) * (1.0 - ii) * (1.0 - a);
+    double impact = changed ? 7.52 * (iss - 0.029) - 3.25 * std::pow(iss - 0.02, 15)
+                            : 6.42 * iss;
+    if (impact <= 0.0) return 0.0;
+    double expl = 8.22 * av * ac * pr * ui;
+    double raw = changed ? 1.08 * (impact + expl) : (impact + expl);
+    if (raw > 10.0) raw = 10.0;
+    return std::ceil(raw * 10.0) / 10.0;  // CVSS 3.1 Roundup to one decimal
+}
+
+// CVSS v2 base score (spec arithmetic). Old CVEs carry only a v2 vector, and the
+// default human view applies a hard High/Critical (>= 7.0) floor, so scoring v2
+// too keeps genuinely severe pre-2016 CVEs visible instead of dropping them for
+// want of a v3 vector. Returns -1.0 on an incomplete vector.
+static double cvss2_base_score(const std::string& vector) {
+    char AV = cvss_metric(vector, "AV"), AC = cvss_metric(vector, "AC");
+    char Au = cvss_metric(vector, "Au"), C = cvss_metric(vector, "C");
+    char I = cvss_metric(vector, "I"), A = cvss_metric(vector, "A");
+    double av = AV == 'N' ? 1.0 : AV == 'A' ? 0.646 : AV == 'L' ? 0.395 : -1;
+    double ac = AC == 'L' ? 0.71 : AC == 'M' ? 0.61 : AC == 'H' ? 0.35 : -1;
+    double au = Au == 'N' ? 0.704 : Au == 'S' ? 0.56 : Au == 'M' ? 0.45 : -1;
+    auto imp = [](char m) -> double {
+        switch (m) { case 'C': return 0.660; case 'P': return 0.275; case 'N': return 0.0;
+                     default: return -1; }
+    };
+    double c = imp(C), i = imp(I), a = imp(A);
+    if (av < 0 || ac < 0 || au < 0 || c < 0 || i < 0 || a < 0) return -1.0;
+    double impact = 10.41 * (1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a));
+    double expl = 20.0 * av * ac * au;
+    double f = impact == 0.0 ? 0.0 : 1.176;
+    double bs = ((0.6 * impact) + (0.4 * expl) - 1.5) * f;
+    if (bs < 0.0) bs = 0.0;
+    return std::round(bs * 10.0) / 10.0;  // v2 rounds to one decimal
+}
+
+// CVSS base score from a vector string, v2 or v3.x. We mirror only the vector
+// (not the number), so recompute it deterministically. -1.0 if unparseable.
+double cvss_base_score(const std::string& vector) {
+    if (vector.rfind("CVSS:3.", 0) == 0) return cvss3_base_score(vector);
+    if (cvss_metric(vector, "Au")) return cvss2_base_score(vector);  // v2 marker
+    return -1.0;
+}
+
+// The default human view keeps only foothold-worthy component CVEs (see cve.hpp).
+// KEV is unconditional (exploited in the wild). Otherwise a hard High/Critical
+// floor applies: Critical (>= 9.0) always shows; below that a CVE must be at least
+// High (>= 7.0), have EPSS traction, be low-complexity, and either carry a real
+// confidentiality/integrity impact or be a *remote* DoS that is actually trending
+// (a higher EPSS bar). Local DoS is dropped entirely. The floor is computed for v2
+// and v3 alike so old CVEs are judged, not hidden by default for lack of a v3
+// vector.
+bool cve_is_high_signal(const CveMatch& m) {
+    if (m.kev) return true;                                       // exploited in the wild
+    double score = cvss_base_score(m.severity);
+    if (score >= kHighSignalCvss) return true;                   // Critical, any shape
+    if (score < kHighFloorCvss) return false;                    // hard floor: High/Critical only
+    if (m.epss < kHighSignalEpss) return false;                  // High needs EPSS traction
+    if (cvss_metric(m.severity, "AC") != 'L') return false;      // drop high-complexity crypto
+    char c = cvss_metric(m.severity, "C"), i = cvss_metric(m.severity, "I");
+    bool has_ci = (c && c != 'N') || (i && i != 'N');            // v2 P/C or v3 L/H
+    if (has_ci) return true;                                     // real confidentiality/integrity impact
+    // Availability-only == DoS. Keep only a REMOTE (AV:N) DoS that is trending;
+    // local/adjacent/physical DoS is not worth a default row.
+    if (cvss_metric(m.severity, "AV") != 'N') return false;
+    return m.epss >= kDosEpss;
+}
 
 std::unordered_set<std::string> load_kev(const std::string& path) {
     std::unordered_set<std::string> out;

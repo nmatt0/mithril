@@ -44,6 +44,7 @@ mithril --secrets <dir>       # secrets only
 mithril --sbom -C out/ <dir>  # SBOM only -> out/sbom.cdx.json + out/sbom.spdx.json
 mithril --cve <dir>           # match components against the local mirror (offline)
 mithril --cve --kernel-cves-all <dir>  # also list every kernel.org CVE for the kernel version (opt-in)
+mithril --cve --component-cves-all <dir>  # human view: list every component CVE, not just high-signal (opt-in)
 mithril --licenses <dir>      # licenses only
 mithril --license-paths <dir> # licenses, with each license's file locations listed
 mithril --rules my.json <dir> # add user-defined rules (docs/user-rules.md)
@@ -72,7 +73,7 @@ Build it once either way; every scan after that is offline. See `docs/cve-join.m
 
 - **secrets**: credential and key material in file content (cloud keys, tokens, JWTs, private keys, high-entropy `KEY=…` values). `/etc/shadow` and `htpasswd` hashes are classified with weak-algorithm and empty-password flags, and credential/crypto/config files are flagged by path.
 - **sbom**: components and versions from package databases, language manifests, binary version strings, libc filenames, and the kernel banner, keyed on purl (with CPE co-derived), emitted as CycloneDX and SPDX.
-- **cve**: the SBOM joined against the local OSV + NVD/CPE mirror, plus the curated kernel-CVE checklist, annotated with KEV and EPSS.
+- **cve**: the SBOM joined against the local OSV + NVD/CPE mirror, plus the curated kernel-CVE checklist, annotated with KEV and EPSS. The default human view shows only foothold-worthy component CVEs (on CISA KEV, or Critical, or a hard High/Critical floor of CVSS >= 7.0 with EPSS traction, low attack complexity, and real impact or a trending remote DoS), sorted worst-first; it drops Mediums, local DoS, and the high-complexity crypto class. `--component-cves-all` lists them all. JSON always carries the complete set plus a `component_cve_scan` summary.
 - **licenses**: SPDX identification from `SPDX-License-Identifier` tags and LICENSE/COPYING/NOTICE text. Human output summarizes by id and count; `--license-paths` lists each license's file locations, and JSON always carries the full `paths` array.
 
 File-type identification, extraction, and embedded key/certificate *file* signatures are moria's job; mithril reads content, it does not unpack. How discovery works is documented in `docs/engine-design.md`.

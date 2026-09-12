@@ -155,22 +155,63 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
     }
 
     // ---- CVE matches ----
+    // The default view is gated to high-signal component CVEs (KEV / CVSS>=9.0 /
+    // EPSS>=0.10) and sorted worst-first, so a manual pentester triages by impact
+    // instead of reading a flat dump of every range match. --component-cves-all
+    // shows the full list; JSON (-j) is always complete regardless of the gate.
     if (passes.cve) {
         if (passes.secrets || passes.sbom) o += "\n";
+
+        // Score + gate every match up front.
+        struct Row { const CveMatch* m; double score; bool high; };
+        std::vector<Row> rows;
+        rows.reserve(rep.cves.size());
+        size_t high_n = 0;
+        for (const auto& m : rep.cves) {
+            bool h = cve_is_high_signal(m);
+            if (h) ++high_n;
+            rows.push_back({&m, cvss_base_score(m.severity), h});
+        }
+        size_t hidden = rep.component_cves_all ? 0 : rep.cves.size() - high_n;
+
         o += a.bold();
         o += std::to_string(rep.cves.size());
         o += rep.cves.size() == 1 ? " CVE" : " CVEs";
         o += a.reset();
+        if (hidden) {
+            o += a.dim();
+            o += "  (" + std::to_string(high_n) + " high-signal shown, " +
+                 std::to_string(hidden) + " hidden)";
+            o += a.reset();
+        }
         o += "\n";
-        if (!rep.cves.empty()) {
+
+        // Rows to render: high-signal only (default) or all (--component-cves-all).
+        std::vector<Row> show;
+        for (const auto& r : rows)
+            if (rep.component_cves_all || r.high) show.push_back(r);
+
+        // The gated view sorts worst-first (KEV, then CVSS, then EPSS); the full
+        // view keeps the join's component-grouped order.
+        if (!rep.component_cves_all) {
+            std::stable_sort(show.begin(), show.end(), [](const Row& x, const Row& y) {
+                if (x.m->kev != y.m->kev) return x.m->kev;
+                if (x.score != y.score) return x.score > y.score;
+                if (x.m->epss != y.m->epss) return x.m->epss > y.m->epss;
+                return x.m->cve_id < y.m->cve_id;
+            });
+        }
+
+        if (!show.empty()) {
             size_t wcve = 3, wcomp = 9;
-            for (const auto& m : rep.cves) {
-                wcve = std::max(wcve, m.cve_id.size());
-                wcomp = std::max(wcomp, m.component.size());
+            for (const auto& r : show) {
+                wcve = std::max(wcve, r.m->cve_id.size());
+                wcomp = std::max(wcomp, r.m->component.size());
             }
             wcomp = std::min<size_t>(wcomp, 32);
             o += "\n";
-            for (const auto& m : rep.cves) {
+            for (const auto& r : show) {
+                const auto& m = *r.m;
                 o += "  ";
                 o += a.yellow();
                 pad(o, m.cve_id, wcve);
@@ -178,6 +219,14 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 o += "  ";
                 o += a.bold();
                 pad(o, clip(m.component, wcomp), wcomp);
+                o += a.reset();
+                o += "  ";
+                // CVSS base score, colored by band (critical red, high yellow).
+                char sb[8];
+                if (r.score >= 0) std::snprintf(sb, sizeof(sb), "%4.1f", r.score);
+                else std::snprintf(sb, sizeof(sb), " n/a");
+                o += r.score >= 9.0 ? a.red() : r.score >= 7.0 ? a.yellow() : a.dim();
+                o += sb;
                 o += a.reset();
                 o += "  ";
                 o += a.dim();
@@ -195,6 +244,15 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 }
                 o += "\n";
             }
+        }
+
+        // When the default view hid CVEs, say how to see the rest.
+        if (hidden) {
+            o += a.dim();
+            o += "\n  Gated to high-signal (KEV, or High/Critical CVSS>=7.0 with EPSS "
+                 "traction, real impact or trending remote DoS).\n"
+                 "  Run --component-cves-all for every component CVE in range.\n";
+            o += a.reset();
         }
     }
 

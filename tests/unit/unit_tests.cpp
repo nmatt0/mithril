@@ -1031,6 +1031,71 @@ static void test_cve() {
     std::remove(idx);
 }
 
+// ---------------------------------------------------- CVSS score + human gate
+static void test_cvss_gate() {
+    using ft::cvss_base_score;
+    // --- CVSS v3.x base scores (spec vectors) ---
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") == 9.8);  // Critical
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N") == 5.9);  // Terrapin
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H") == 7.5);  // remote DoS
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H") == 10.0); // scope-changed
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N") == 0.0);  // no impact
+    CHECK(cvss_base_score("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") == 9.8);  // v3.0 prefix
+    // --- CVSS v2 base scores (now computed too, for the hard floor) ---
+    CHECK(cvss_base_score("AV:N/AC:L/Au:N/C:P/I:P/A:P") == 7.5);   // classic 7.5 v2
+    CHECK(cvss_base_score("AV:N/AC:L/Au:N/C:C/I:C/A:C") == 10.0);  // full-impact v2 -> 10.0
+    CHECK(cvss_base_score("AV:L/AC:H/Au:N/C:P/I:N/A:N") == 1.2);   // local, low v2
+    // --- unparseable -> -1.0 ---
+    CHECK(cvss_base_score("") == -1.0);
+    CHECK(cvss_base_score("CVSS:3.1/AV:N/AC:L") == -1.0);          // v3 missing metrics
+    CHECK(cvss_base_score("CVSS:3.1/AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") == -1.0);  // bad value
+    CHECK(cvss_base_score("AV:N/AC:L/Au:N/C:P/I:P") == -1.0);      // v2 missing A
+
+    auto mk = [](const char* cvss, bool kev, double epss) {
+        ft::CveMatch m;
+        m.cve_id = "CVE-X";
+        m.severity = cvss;
+        m.kev = kev;
+        m.epss = epss;
+        return m;
+    };
+    // KEV is unconditional -- even a Medium, even AC:H, even no EPSS.
+    CHECK(ft::cve_is_high_signal(mk("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N", true, 0.0)));
+    // Critical (>= 9.0) always shows, any shape / EPSS.
+    CHECK(ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", false, 0.0)));
+
+    // --- the hard High/Critical floor: Mediums are dropped even with high EPSS ---
+    // CVE-2017-3735 shape (5.3, I:L only), EPSS 0.21 -> hidden.
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N", false, 0.21)));
+    // CVE-2017-3736 shape (6.5, DoS), EPSS 0.10 -> hidden (below 7.0).
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H", false, 0.10)));
+
+    // --- High band (7.0-8.9): needs EPSS traction + low complexity + real impact ---
+    // 8.8 real integrity impact, EPSS over the bar -> shown; under the bar -> hidden.
+    CHECK(ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", false, 0.15)));
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", false, 0.05)));
+    // High-complexity crypto (DROWN shape, C:H/AC:H) -> hidden regardless of EPSS.
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N", false, 0.82)));
+    // Heartbleed shape (C:H, AC:L, network) at High with EPSS -> shown.
+    CHECK(ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", false, 0.20)));
+
+    // --- DoS handling: remote kept only if trending; local dropped ---
+    // Remote DoS (AV:N, avail-only, 7.5): EPSS >= 0.70 shown, below hidden.
+    CHECK(ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", false, 0.73)));
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", false, 0.50)));
+    // Local DoS: AV:L, avail-only, scored 7.1 via scope change, EPSS 0.95 -> hidden
+    // (local availability is not worth a default row).
+    CHECK(!ft::cve_is_high_signal(mk("CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H", false, 0.95)));
+
+    // --- v2 CVEs are judged by the same floor (not hidden for lack of a v3 vector) ---
+    // v2 10.0 full-impact, EPSS over the bar -> shown.
+    CHECK(ft::cve_is_high_signal(mk("AV:N/AC:L/Au:N/C:C/I:C/A:C", false, 0.20)));
+    // v2 7.5 (C:P/I:P/A:P real impact), EPSS over the bar -> shown.
+    CHECK(ft::cve_is_high_signal(mk("AV:N/AC:L/Au:N/C:P/I:P/A:P", false, 0.20)));
+    // v2 Medium (local, 1.2) -> hidden by the floor even with high EPSS.
+    CHECK(!ft::cve_is_high_signal(mk("AV:L/AC:H/Au:N/C:P/I:N/A:N", false, 0.90)));
+}
+
 // ---------------------------------------------------------------- nvd/cpe join
 static void test_nvd() {
     // affected-range evaluation
@@ -1382,6 +1447,7 @@ int main() {
     test_userrules();
     test_version();
     test_cve();
+    test_cvss_gate();
     test_nvd();
     test_rpm();
     test_langmanifest();
