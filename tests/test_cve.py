@@ -103,8 +103,10 @@ def main():
         # NVD augment: a binary-version openssl (from an ELF banner) -> CPE join.
         elfdir = os.path.join(d, "bv", "usr", "lib")
         os.makedirs(elfdir)
+        # A real OPENSSL_VERSION_TEXT banner (version + build date); binver requires
+        # the trailing date so requirement/dev strings are not mistaken for a version.
         with open(os.path.join(elfdir, "libssl.so"), "wb") as f:
-            f.write(b"\x7fELF padding OpenSSL 1.1.1m end")  # < 1.1.1n -> vulnerable
+            f.write(b"\x7fELF padding OpenSSL 1.1.1m  14 Dec 2021 end")  # < 1.1.1n -> vulnerable
         rep3 = run(binary, os.path.join(d, "bv"), dbdir)
         nvd = {(c["cve"], c["component"]) for c in rep3.get("cves", [])
                if "nvd-cpe" in c.get("basis", "")}

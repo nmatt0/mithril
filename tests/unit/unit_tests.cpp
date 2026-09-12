@@ -363,8 +363,8 @@ static void test_binver() {
     // "\x7f" "ELF" via explicit bytes (\x7f\x45\x4c\x46); banners separated by
     // spaces (is_elf only checks the first 4 bytes, the rest is arbitrary).
     std::string elf = std::string("\x7f\x45\x4c\x46", 4) +
-                      " pad BusyBox v1.36.1 (2023-01-01) OpenSSL 1.1.1n Dropbear v2022.83 "
-                      "more BusyBox v1.36.1 again end";
+                      " pad BusyBox v1.36.1 (2023-01-01) OpenSSL 1.1.1n  25 Mar 2021 "
+                      "Dropbear v2022.83 more BusyBox v1.36.1 again end";
     auto cs = binver(elf);
     auto by = [&](const std::string& n) -> const ft::Component* {
         for (const auto& c : cs)
@@ -420,6 +420,31 @@ static void test_binver() {
     // LuaJIT must not match the Lua rule (different product).
     std::string ljit = std::string("\x7f\x45\x4c\x46", 4) + " LuaJIT 2.0.5 ";
     CHECK(binver(ljit).empty());
+
+    // --- openssl version precision (issue #7): the version must come from the
+    // authoritative banner ("OpenSSL <ver>  <build date>"), not from requirement
+    // text or a dev-build placeholder that carry no real date. ---
+    auto ossl_ver = [](const std::string& body) -> std::string {
+        std::string e = std::string("\x7f\x45\x4c\x46", 4) + " " + body + " end";
+        for (const auto& c : binver(e))
+            if (c.name == "openssl") return c.version;
+        return "";
+    };
+    // Rejected: requirement / help strings (the reporter's exact case) with no date.
+    CHECK(ossl_ver("OpenSSL 1.1.1 or later. If you use a different backend") == "");
+    CHECK(ossl_ver("For OpenSSL 3.0.0 and newer it returns the default provider") == "");
+    // Rejected: dev-build placeholder date ("xx XXX xxxx").
+    CHECK(ossl_ver("Big Number part of OpenSSL 1.1.0-fips-dev xx XXX xxxx") == "");
+    // Kept: authoritative banner, both date orders and single-digit day.
+    CHECK(ossl_ver("OpenSSL 3.0.13 30 Jan 2024") == "3.0.13");
+    CHECK(ossl_ver("OpenSSL 1.0.0a 1 Jun 2010") == "1.0.0a");
+    CHECK(ossl_ver("OpenSSL 0.9.7a Feb 19 2003") == "0.9.7a");        // Mon DD YYYY
+    // Kept: a FIPS suffix (both "-fips" and " FIPS") between version and date; the
+    // base version is captured.
+    CHECK(ossl_ver("OpenSSL 1.0.1r-fips  28 Jan 2016") == "1.0.1r");
+    CHECK(ossl_ver("OpenSSL 1.1.1f FIPS  31 Mar 2020") == "1.1.1f");
+    // Kept: the per-object "part of OpenSSL <ver> <date>" build stamp (real version).
+    CHECK(ossl_ver("SSLv2 part of OpenSSL 0.9.7g 11 Apr 2005") == "0.9.7g");
 }
 
 // ---------------------------------------------------------------- u-boot banner
@@ -440,6 +465,15 @@ static void test_uboot() {
     auto rc = uboot("U-Boot 2023.04-rc2 (May 01 2023)");
     CHECK(rc.size() == 1 && rc[0].version == "2023.04");
     CHECK(uboot("random text, no bootloader here").empty());
+    // A "-svn"/"-g<sha>"/"-dirty" vendor suffix before the build timestamp is fine.
+    auto svn = uboot("U-Boot 2019.04-svn14626 (May 20 2024 - 17:23:07 +0800)");
+    CHECK(svn.size() == 1 && svn[0].version == "2019.04");
+    // issue #7: the u-boot-tools userspace stamp "Compiled with U-Boot <ver>"
+    // (carried by fw_printenv/fw_setenv) is the tool's build reference, not the
+    // deployed bootloader -> rejected. It has no parenthesized build timestamp.
+    CHECK(uboot("... Compiled with U-Boot 2023.04\nu-boot,env").empty());
+    // A bare version with no build timestamp is not the bootloader banner -> rejected.
+    CHECK(uboot("string mentions U-Boot 2020.10 somewhere").empty());
     // u-boot is in the NVD product set so its CVEs get covered.
     bool has_uboot = false;
     for (auto& [v, p] : ft::binver_cpe_products())

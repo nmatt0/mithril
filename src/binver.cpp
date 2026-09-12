@@ -25,7 +25,19 @@ struct VersionSig {
 const std::vector<VersionSig>& sigs() {
     static const std::vector<VersionSig> s = {
         {"busybox", {"BusyBox v"}, R"(BusyBox v(\d+\.\d+\.\d+))", "busybox", "busybox"},
-        {"openssl", {"OpenSSL "}, R"(OpenSSL (\d+\.\d+\.\d+[a-z]?))", "openssl", "openssl"},
+        // openssl: the authoritative banner is OPENSSL_VERSION_TEXT, "OpenSSL
+        // <ver>[<suffix>]  <build date>" (e.g. "OpenSSL 1.1.1l  24 Aug 2021").
+        // Requiring the trailing date rejects requirement/help text ("OpenSSL
+        // 1.1.1 or later", "For OpenSSL 3.0.0 and newer") and dev-build
+        // placeholders ("OpenSSL 1.1.0-fips-dev xx XXX xxxx"), which have no real
+        // date and otherwise yield a bogus version (issue #7). An optional suffix
+        // ("-fips", " FIPS") sits between version and date; the date is either
+        // "DD Mon YYYY" or "Mon DD YYYY". Capture group 1 is the base version.
+        {"openssl",
+         {"OpenSSL "},
+         R"(OpenSSL (\d+\.\d+\.\d+[a-z]?)(?:[-\s][A-Za-z][\w-]*)?\s+(?:\d{1,2} [A-Z][a-z]{2}|[A-Z][a-z]{2} +\d{1,2}) \d{4})",
+         "openssl",
+         "openssl"},
         {"dropbear",
          {"Dropbear v", "Dropbear-", "dropbear_"},
          R"([Dd]ropbear[ _v-]*(\d{4}\.\d+))",
@@ -114,16 +126,25 @@ std::vector<Component> scan_uboot_version(std::span<const uint8_t> data,
                                           const std::string& origin_path) {
     std::vector<Component> out;
     std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
-    // The date-scheme banner ("U-Boot 2019.04 (Apr 15 2019 - ...)") dominant since
-    // 2008; capture just the "YYYY.MM" token so it matches the NVD denx:u-boot CPE
-    // (a "-rc"/"-g<sha>" vendor suffix is dropped for a clean version compare).
-    static const std::regex re(R"(U-Boot (20\d\d\.\d+(?:\.\d+)?))",
+    // The real bootloader banner is "U-Boot <ver>[-suffix] (<build timestamp>)"
+    // (e.g. "U-Boot 2019.04-svn14626 (May 20 2024 - 17:23:07 +0800)"). Requiring
+    // the parenthesized build timestamp rejects the u-boot-tools userspace stamp
+    // "Compiled with U-Boot 2023.04" carried by fw_printenv/fw_setenv, which is the
+    // build reference of the env tool, not the deployed bootloader (issue #7).
+    // Capture just "YYYY.MM[.p]" for the NVD denx:u-boot CPE (the "-rc"/"-g<sha>"/
+    // "-svn" vendor suffix is dropped for a clean compare).
+    static const std::regex re(R"(U-Boot (20\d\d\.\d+(?:\.\d+)?)(?:-\S+)? \()",
                                std::regex::ECMAScript | std::regex::optimize);
     const std::string anchor = "U-Boot 20";
+    const std::string tool_prefix = "Compiled with ";
     std::string seen;
     for (size_t p = text.find(anchor); p != std::string_view::npos;
          p = text.find(anchor, p + 1)) {
-        size_t end = std::min(text.size(), p + 48);
+        // Skip the userspace tool stamp even if it ever grows a paren timestamp.
+        if (p >= tool_prefix.size() &&
+            text.substr(p - tool_prefix.size(), tool_prefix.size()) == tool_prefix)
+            continue;
+        size_t end = std::min(text.size(), p + 64);
         std::string window(text.substr(p, end - p));
         std::smatch m;
         if (!std::regex_search(window, m, re) || m.size() < 2) continue;
