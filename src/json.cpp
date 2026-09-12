@@ -83,6 +83,14 @@ void emit_cve(std::string& o, const CveMatch& m) {
     kv_str(o, "component", m.component, first);
     if (!m.component_purl.empty()) kv_str(o, "purl", m.component_purl, first);
     if (!m.severity.empty()) kv_str(o, "severity", m.severity, first);
+    if (double s = cvss_base_score(m.severity); s >= 0) {
+        char b[8];
+        std::snprintf(b, sizeof(b), "%.1f", s);
+        if (!first) o += ",";
+        first = false;
+        o += "\"cvss_score\":";
+        o += b;
+    }
     kv_str(o, "basis", m.basis, first);
     if (!m.summary.empty()) kv_str(o, "summary", m.summary, first);
     if (m.kev) kv_bool(o, "kev", true, first);
@@ -190,6 +198,29 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
             emit_cve(o, rep.cves[i]);
         }
         o += "]";
+
+        // The "cves" array above is always complete. This records how many of them
+        // the default human view surfaces (gated to KEV / CVSS>=9.0 / EPSS>=0.10),
+        // so a tool caller knows the human triage set without recomputing the gate.
+        if (!rep.cves.empty()) {
+            size_t high = 0;
+            for (const auto& m : rep.cves)
+                if (cve_is_high_signal(m)) ++high;
+            o += ",\"component_cve_scan\":{";
+            bool sf = true;
+            kv_num(o, "total", rep.cves.size(), sf);
+            kv_num(o, "high_signal", high, sf);
+            kv_num(o, "hidden", rep.cves.size() - high, sf);
+            kv_str(o, "gate",
+                   "kev OR cvss>=9.0 OR (cvss>=7.0 AND epss>=0.10 AND AC:L AND "
+                   "(real-C/I-impact OR remote-DoS with epss>=0.70))", sf);
+            kv_str(o, "note",
+                   "the \"cves\" array is complete; \"high_signal\" is the count shown in "
+                   "the default human view; run --component-cves-all to list all in human output",
+                   sf);
+            o += "}";
+        }
+
         o += ",\"kernel_cves\":[";
         for (size_t i = 0; i < rep.kernel_cves.size(); ++i) {
             const auto& k = rep.kernel_cves[i];

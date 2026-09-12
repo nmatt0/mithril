@@ -92,6 +92,35 @@ std::vector<CveMatch> cve_join(const Index& db, const std::vector<Component>& co
 // both bases. Deterministic (sorted) output.
 std::vector<CveMatch> reconcile_cves(std::vector<CveMatch> matches);
 
+// CVSS v3.0/v3.1 base score computed from a vector string
+// ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"). Returns the 0.0-10.0 base
+// score, or -1.0 if `vector` is not a parseable CVSS v3.x base vector (empty,
+// CVSS v2, or missing a required base metric). We store only the vector in the
+// mirror, so this recomputes the number deterministically per the CVSS 3.1 spec.
+double cvss_base_score(const std::string& vector);
+
+// The default human CVE view is gated to foothold-worthy findings for a manual
+// pentester; the JSON view stays complete. A component CVE is "high-signal" if:
+//   - it is on the CISA KEV catalog (exploited in the wild) -- unconditional; OR
+//   - its CVSS base score is >= 9.0 (Critical) -- any shape; OR
+//   - it clears a hard High/Critical floor (base score >= 7.0) AND has EPSS
+//     traction (>= 0.10) AND is low-complexity (AC:L) AND EITHER
+//       * carries a real confidentiality/integrity impact, OR
+//       * is a *remote* DoS (AV:N, availability-only) that is trending (EPSS
+//         >= kDosEpss -- a DoS is lower-yield, so it needs a stronger signal).
+// Local/adjacent/physical DoS is always dropped. The hard floor removes Medium
+// noise that trends on EPSS; the extra impact/complexity test removes the famous
+// but low-yield crypto/DoS CVEs old libraries accumulate (SWEET32, DROWN, padding
+// oracles). A pure DoS cannot reach CVSS 9.0, so the Critical arm needs no test.
+// Scores are computed for CVSS v2 and v3 alike so the floor judges old CVEs
+// instead of hiding them. --component-cves-all bypasses the whole gate; kernel
+// CVEs gate separately.
+constexpr double kHighSignalCvss = 9.0;   // Critical: always shown
+constexpr double kHighFloorCvss = 7.0;    // hard floor: High/Critical only below Critical
+constexpr double kHighSignalEpss = 0.10;  // EPSS traction for a High with real impact
+constexpr double kDosEpss = 0.70;         // stronger EPSS bar for a remote DoS to show
+bool cve_is_high_signal(const CveMatch& m);
+
 // ---- exploit annotations (value-add only; never gate a finding) ----
 // CISA KEV cve ids from kev.json ({"cves":[...]}); empty if the file is absent.
 std::unordered_set<std::string> load_kev(const std::string& path);

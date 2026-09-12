@@ -57,6 +57,8 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "  -A, --all           Run every pass (the default when none is selected)\n"
                  "      --kernel-cves-all  List every CVE for the detected kernel version, not\n"
                  "                         just the curated set (needs the kernel feed; implies --cve)\n"
+                 "      --component-cves-all  Human view: list every component CVE, not just the\n"
+                 "                         high-signal set (KEV / CVSS>=9.0 / EPSS>=0.10; implies --cve)\n"
                  "      --rules <FILE>  Add user-defined rules from a JSON file\n"
                  "      --fetch-db      Download a prebuilt CVE mirror, then exit\n"
                  "      --update-db     Rebuild the local CVE mirror from source, then exit\n"
@@ -91,6 +93,7 @@ int main(int argc, char** argv) {
     bool fetch_db = false;
     bool dump_kconfig = false;
     bool kernel_cves_all = false;
+    bool component_cves_all = false;
     bool license_paths = false;
     bool with_kernel_feed = false;
     Passes passes;
@@ -137,6 +140,8 @@ int main(int argc, char** argv) {
             dump_kconfig = true;
         } else if (!end_of_opts && std::strcmp(a, "--kernel-cves-all") == 0) {
             kernel_cves_all = true;
+        } else if (!end_of_opts && std::strcmp(a, "--component-cves-all") == 0) {
+            component_cves_all = true;
         } else if (!end_of_opts && std::strcmp(a, "--license-paths") == 0) {
             license_paths = true;
         } else if (!end_of_opts && std::strcmp(a, "--with-kernel-feed") == 0) {
@@ -182,8 +187,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // --kernel-cves-all is a CVE-pass feature; make sure that pass runs.
+    // --kernel-cves-all / --component-cves-all are CVE-pass features; make sure
+    // that pass runs.
     if (kernel_cves_all) passes.cve = true;
+    if (component_cves_all) passes.cve = true;
     // --license-paths expands the license section; make sure that pass runs.
     if (license_paths) passes.licenses = true;
 
@@ -288,6 +295,10 @@ int main(int argc, char** argv) {
                     if (have.insert(fr.cve).second) rep.kernel_cves.push_back(std::move(fr));
             }
         }
+
+        // Human view gates component CVEs to high-signal (KEV / CVSS>=9.0 /
+        // EPSS>=0.10) unless the user opts into the full list; JSON is unaffected.
+        rep.component_cves_all = component_cves_all;
 
         // Value-add annotation only (never affects applicability): tag findings
         // that are on CISA KEV or carry an EPSS score.
