@@ -445,6 +445,24 @@ static void test_binver() {
     CHECK(ossl_ver("OpenSSL 1.1.1f FIPS  31 Mar 2020") == "1.1.1f");
     // Kept: the per-object "part of OpenSSL <ver> <date>" build stamp (real version).
     CHECK(ossl_ver("SSLv2 part of OpenSSL 0.9.7g 11 Apr 2005") == "0.9.7g");
+
+    // --- hostapd / wpa_supplicant patch level (issue #10) ---
+    auto ver_of = [](const std::string& name, const std::string& body) -> std::string {
+        std::string e = std::string("\x7f\x45\x4c\x46", 4) + " " + body + " end";
+        for (const auto& c : binver(e))
+            if (c.name == name) return c.version;
+        return "";
+    };
+    // Old 0.x releases carry a three-part version -> keep the patch level.
+    CHECK(ver_of("hostapd", "hostapd v0.5.9") == "0.5.9");
+    CHECK(ver_of("wpa_supplicant", "wpa_supplicant v0.7.3") == "0.7.3");
+    // Modern two-part releases are unchanged.
+    CHECK(ver_of("hostapd", "hostapd v2.10") == "2.10");
+    CHECK(ver_of("wpa_supplicant", "wpa_supplicant v2.9") == "2.9");
+    // Vendor-fork suffixes resolve to the clean base (the third part needs a dot+digits).
+    CHECK(ver_of("wpa_supplicant", "wpa_supplicant v2.10_ATBM_0.2_") == "2.10");
+    CHECK(ver_of("wpa_supplicant", "wpa_supplicant v0.8.x_rtw_r24") == "0.8");
+    CHECK(ver_of("wpa_supplicant", "wpa_supplicant v2.10-devel") == "2.10");
 }
 
 // ---------------------------------------------------------------- u-boot banner

@@ -51,9 +51,14 @@ const std::vector<VersionSig>& sigs() {
         // NOTE: no OpenSSH banner rule — dropbear/openssh embed bug-compatibility
         // version lists ("OpenSSH_3.0", "OpenSSH_7.x", …) that a banner match reads
         // as dozens of bogus versions. dropbear (the SSH in most firmware) is above.
-        {"wpa_supplicant", {"wpa_supplicant v"}, R"(wpa_supplicant v(\d+\.\d+))", "w1.fi",
+        // hostapd/wpa_supplicant: keep the patch level when the banner carries one
+        // ("hostapd v0.5.9" -> 0.5.9), which the old 0.x releases used; the common
+        // two-part releases (2.9/2.10/2.11) are unaffected, and a vendor-fork suffix
+        // ("v0.8.x_rtw_r24", "v2.10_ATBM_0.2") still resolves to the base version
+        // because the optional third part requires a dot + digits (issue #10).
+        {"wpa_supplicant", {"wpa_supplicant v"}, R"(wpa_supplicant v(\d+\.\d+(?:\.\d+)?))", "w1.fi",
          "wpa_supplicant"},
-        {"hostapd", {"hostapd v"}, R"(hostapd v(\d+\.\d+))", "w1.fi", "hostapd"},
+        {"hostapd", {"hostapd v"}, R"(hostapd v(\d+\.\d+(?:\.\d+)?))", "w1.fi", "hostapd"},
         {"mosquitto", {"mosquitto version "}, R"(mosquitto version (\d+\.\d+\.\d+))", "eclipse",
          "mosquitto"},
         {"glibc", {"GNU C Library"}, R"(release version (\d+\.\d+(?:\.\d+)?))", "gnu", "glibc"},
