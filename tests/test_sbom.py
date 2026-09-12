@@ -113,9 +113,43 @@ def main():
             print("FAIL: SPDX packages != report components")
             fails += 1
 
+        # --- binary-version precision (issue #7) ---
+        # A separate rootfs of synthetic ELFs: version strings must come from the
+        # authoritative banner, not requirement text / dev placeholders / the
+        # u-boot-tools userspace stamp.
+        bv = os.path.join(d, "bv")
+        elf = b"\x7fELF"
+        def wfile(rel, body):
+            p = os.path.join(bv, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(elf + b" pad " + body + b" end")
+        # False: curl help text and a python module requirement string.
+        wfile("usr/bin/curl", b"OpenSSL 1.1.1 or later. Use a different backend...")
+        wfile("usr/lib/_hashlib.so", b"For OpenSSL 3.0.0 and newer it returns the provider")
+        # False: fips dev-build placeholder date.
+        wfile("usr/bin/fips_algvs", b"Big Number part of OpenSSL 1.1.0-fips-dev xx XXX xxxx")
+        # False: the u-boot-tools userspace stamp (not the bootloader).
+        wfile("usr/sbin/fw_printenv", b"Compiled with U-Boot 2023.04\nu-boot,env")
+        # True: the authoritative openssl banner and a real u-boot bootloader banner.
+        wfile("usr/bin/openssl", b"OpenSSL 3.0.13 30 Jan 2024")
+        wfile("boot/u-boot.bin", b"U-Boot 2019.04-svn14626 (May 20 2024 - 17:23:07 +0800)")
+
+        bvrep = json.loads(subprocess.check_output([binary, "-j", "--sbom", bv],
+                                                   stderr=subprocess.DEVNULL))
+        ossl = sorted(c["version"] for c in bvrep.get("components", []) if c["name"] == "openssl")
+        ub = sorted(c["version"] for c in bvrep.get("components", []) if c["name"] == "u-boot")
+        if ossl != ["3.0.13"]:
+            print(f"FAIL: openssl precision: expected ['3.0.13'], got {ossl}")
+            fails += 1
+        if ub != ["2019.04"]:
+            print(f"FAIL: u-boot precision: expected ['2019.04'], got {ub}")
+            fails += 1
+
         if fails == 0:
             print(f"PASS: {len(names)} components (not-installed excluded), "
-                  f"CycloneDX + SPDX emitted and consistent")
+                  f"CycloneDX + SPDX emitted and consistent; binary-version precision "
+                  f"(issue #7) rejects requirement/dev/tool strings, keeps real banners")
             return 0
         return 1
 
