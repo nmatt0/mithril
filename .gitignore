@@ -9,6 +9,14 @@ __pycache__/
 *.pyc
 # Vulnerability-feed mirrors and other large local data are not committed.
 data/
+# Debian packaging build artifacts (debian/ sources are tracked; outputs are not)
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/.debhelper/
+/debian/mithril/
+/debian/tmp/
+/obj-*/
 # Private running dev log — kept locally, never committed.
 PROGRESS.md
 # Internal toolkit skill file — kept locally, never committed.

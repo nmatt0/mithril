@@ -1,0 +1,35 @@
+Source: mithril
+Section: utils
+Priority: optional
+Maintainer: Matt Brown <matt@brownfinesecurity.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+Standards-Version: 4.7.0
+Homepage: https://github.com/nmatt0/mithril
+Vcs-Git: https://github.com/nmatt0/mithril.git
+Vcs-Browser: https://github.com/nmatt0/mithril
+Rules-Requires-Root: no
+
+Package: mithril
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Recommends:
+ curl,
+Suggests:
+ unzip,
+Description: firmware content analysis for secrets, SBOM, CVEs and licenses
+ mithril analyzes the contents of firmware and IoT software, a single file or
+ an unpacked rootfs, for four things as structured JSON: embedded secrets and
+ key material; a software bill of materials (emitted as CycloneDX and SPDX)
+ built from package databases, language manifests and binary version strings;
+ known CVEs matched against a local offline vulnerability mirror; and
+ open-source licenses.
+ .
+ It pairs with moria, which handles structural identification and unpacking.
+ Secrets, SBOM and license analysis run fully offline. The CVE pass reads a
+ local mirror that is refreshed out of band (mithril --fetch-db, which needs
+ curl). Live verification of candidate secrets is delegated to trufflehog when
+ it is installed; mithril never links it.

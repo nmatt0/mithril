@@ -1,0 +1,5 @@
+mithril (0.2.0-1) unstable; urgency=medium
+
+  * Debian packaging for mithril.
+
+ -- Matt Brown <matt@brownfinesecurity.com>  Sun, 13 Sep 2026 00:00:00 -0400

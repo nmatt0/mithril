@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+# Build mithril with debhelper's cmake buildsystem. No external codec libraries:
+# mithril carries its own inflate and links only the C++ runtime and pthreads.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=Release
