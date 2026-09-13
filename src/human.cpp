@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "kconfig_infer.hpp"
 
@@ -32,17 +34,23 @@ void pad(std::string& o, const std::string& s, size_t w) {
     for (size_t i = s.size(); i < w; ++i) o += ' ';
 }
 
-std::string clip(const std::string& s, size_t w) {
+std::string clip_to(const std::string& s, size_t w) {
     if (s.size() <= w) return s;
     if (w <= 3) return s.substr(0, w);
     return "..." + s.substr(s.size() - (w - 3));
 }
 
+// Width the value line (e.g. a kernel command line) is shown to before it is
+// tail-truncated with "..."; `--verbose` shows the whole value instead.
+constexpr size_t kValueWidth = 200;
+
 }  // namespace
 
 std::string emit_report_human(const Report& rep, const Passes& passes, const std::string& footer,
-                              bool color, bool license_paths) {
+                              bool color, bool license_paths, bool verbose) {
     Ansi a{color};
+    // In verbose mode nothing is tail-truncated; otherwise clip to the column.
+    auto clip = [&](const std::string& s, size_t w) { return verbose ? s : clip_to(s, w); };
     std::string o;
 
     // ---- secrets ----
@@ -584,6 +592,78 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 o += "  (" + e.second + ")\n";
             else
                 o += "  " + e.first + "  (" + e.second + ")\n";
+        }
+    }
+
+    // ---- boot security ----
+    if (passes.boot) {
+        if (passes.secrets || passes.sbom || passes.cve || passes.licenses) o += "\n";
+        std::unordered_set<std::string> uniq;
+        for (const auto& h : rep.boot) uniq.insert(h.finding.type + "\x1f" + h.finding.label);
+        o += a.bold();
+        o += std::to_string(rep.boot.size());
+        o += rep.boot.size() == 1 ? " boot finding" : " boot findings";
+        if (uniq.size() < rep.boot.size()) o += " (" + std::to_string(uniq.size()) + " unique)";
+        o += a.reset();
+        o += "\n\n";
+        if (rep.boot.empty()) {
+            o += "  no boot artifacts (U-Boot env, device tree, FIT) found\n";
+        } else {
+            // Split the [sev] prefix off the evidence; order high -> medium -> info.
+            auto sev_rank = [](const std::string& ev) {
+                if (ev.rfind("[high]", 0) == 0) return 0;
+                if (ev.rfind("[medium]", 0) == 0) return 1;
+                return 2;
+            };
+            std::vector<const Hit*> rows;
+            rows.reserve(rep.boot.size());
+            for (const auto& h : rep.boot) rows.push_back(&h);
+            std::stable_sort(rows.begin(), rows.end(), [&](const Hit* x, const Hit* y) {
+                int rx = sev_rank(x->finding.evidence), ry = sev_rank(y->finding.evidence);
+                if (rx != ry) return rx < ry;
+                return x->finding.type < y->finding.type;
+            });
+            size_t wtype = 4;
+            for (const Hit* h : rows) wtype = std::max(wtype, h->finding.type.size());
+            wtype = std::min<size_t>(wtype, 26);
+            // Collapse identical (type, value) findings — the same lead repeated
+            // across e.g. a multi-config FIT's sub-FDTs — into one row + a count.
+            auto key = [](const Hit* h) { return h->finding.type + "\x1f" + h->finding.label; };
+            std::unordered_map<std::string, int> counts;
+            for (const Hit* h : rows) counts[key(h)]++;
+            std::unordered_set<std::string> shown;
+            for (const Hit* h : rows) {
+                if (!shown.insert(key(h)).second) continue;  // already collapsed
+                const int n = counts[key(h)];
+                const std::string& ev = h->finding.evidence;
+                int r = sev_rank(ev);
+                const char* tag = r == 0 ? "high" : (r == 1 ? "med " : "info");
+                const char* col = r == 0 ? a.red() : (r == 1 ? a.yellow() : a.dim());
+                size_t close = ev.find(']');
+                std::string reason = close != std::string::npos ? ev.substr(close + 2) : ev;
+                o += "  ";
+                o += col;
+                o += tag;
+                o += a.reset();
+                o += "  ";
+                o += a.cyan();
+                pad(o, clip(h->finding.type, wtype), wtype);
+                o += a.reset();
+                o += "  ";
+                o += reason;
+                if (n > 1) o += " (\xc3\x97" + std::to_string(n) + ")";  // "(×N)"
+                o += "\n";
+                // Value + source path, dimmed, on the continuation line.
+                if (!h->finding.label.empty()) {
+                    o += "        ";
+                    o += a.dim();
+                    o += clip(h->finding.label, kValueWidth);
+                    o += "  (" + h->path + (n > 1 ? ", +" + std::to_string(n - 1) + " more" : "") +
+                         ")";
+                    o += a.reset();
+                    o += "\n";
+                }
+            }
         }
     }
 

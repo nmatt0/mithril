@@ -24,8 +24,9 @@ struct Passes {
     bool sbom = false;
     bool cve = false;
     bool licenses = false;
-    bool any() const { return secrets || sbom || cve || licenses; }
-    void all() { secrets = sbom = cve = licenses = true; }
+    bool boot = false;
+    bool any() const { return secrets || sbom || cve || licenses || boot; }
+    void all() { secrets = sbom = cve = licenses = boot = true; }
 };
 
 // One finding together with the file it was found in (path relative to the root).
@@ -59,6 +60,7 @@ struct Report {
     bool kernel_cves_full = false;      // --kernel-cves-all: the kernel.org feed was merged in
     bool component_cves_all = false;    // --component-cves-all: show every component CVE in human view
     std::vector<Hit> licenses;          // license findings (SPDX tags + license files)
+    std::vector<Hit> boot;              // boot-security findings (U-Boot env, DTB/FIT)
 
     // Files that could not be read (path -> reason), surfaced for honesty.
     std::vector<std::pair<std::string, std::string>> errors;

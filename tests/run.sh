@@ -16,6 +16,7 @@ echo "== unit tests =="
 "./$BUILD/mithril_unit"
 
 echo "== integration: secrets =="
+python3 tools/gen_bootkeys.py --check
 python3 tests/test_secrets.py "./$BUILD/mithril"
 
 echo "== integration: der private keys =="
@@ -31,6 +32,8 @@ echo "== integration: licenses =="
 python3 tests/test_licenses.py "./$BUILD/mithril"
 
 echo "== integration: kconfig (hand-rolled DEFLATE) =="
+python3 tests/test_boot.py
+echo
 python3 tests/test_kconfig.py "./$BUILD/mithril"
 
 echo "== integration: kconfig recovery + tri-state kernel-CVE gating =="
