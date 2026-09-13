@@ -1,0 +1,232 @@
+.TH MITHRIL 1 "2026-09-12" "mithril 0.1.3" "User Commands"
+.SH NAME
+mithril \- analyze firmware contents for secrets, SBOM, CVEs, and licenses
+.SH SYNOPSIS
+.B mithril
+.RI [ options ]
+.I <file|dir>
+.br
+.B mithril
+.BR \-\-fetch\-db | \-\-update\-db
+.RI [ \-\-with\-kernel\-feed ]
+.SH DESCRIPTION
+.B mithril
+reads the contents of firmware and IoT software, a single file or an unpacked
+rootfs, and reports four things as structured findings:
+.IP \(bu 2
+.B secrets:
+embedded credential and key material (API tokens, cloud keys, JWTs, private
+keys, /etc/shadow hashes), each with a deterministic offline confidence rating.
+.IP \(bu 2
+.B SBOM:
+a software bill of materials built from package databases (dpkg/opkg/apk/rpm),
+language manifests, ELF version strings, versioned libc filenames, and the
+kernel banner. Emitted as CycloneDX and SPDX.
+.IP \(bu 2
+.B CVEs:
+the SBOM joined against a local offline vulnerability mirror (OSV plus NVD/CPE)
+and a curated, version- and kconfig-gated kernel-CVE checklist, annotated with
+CISA KEV and EPSS.
+.IP \(bu 2
+.B licenses:
+the open-source licenses present, for compliance and provenance.
+.PP
+.B mithril
+pairs with
+.BR moria (1),
+which handles structural identification and unpacking. A typical pipeline runs
+.B moria \-e
+to unpack an image, then
+.B mithril
+over the extracted tree.
+.PP
+A scan makes no network calls. The secrets, SBOM, and license passes are fully
+offline. The CVE pass reads a local mirror that is refreshed out of band (see
+.B THE CVE MIRROR
+below), so it is air-gappable once the mirror is in place. Output is
+human-readable by default; pass
+.BR \-j / \-\-json
+for a single JSON object designed to be consumed by a tool or model.
+.PP
+With no pass flag, every pass runs. Naming one or more passes
+.RB ( \-\-secrets ", " \-\-sbom ", " \-\-cve ", " \-\-licenses )
+restricts the run to those.
+.SH ARGUMENTS
+.TP
+.I <file|dir>
+A single file, or a directory (typically moria's
+.IR .extracted/
+output) to scan recursively.
+.SH OPTIONS
+.SS Passes
+.TP
+.B \-\-secrets
+Scan file content for credential and key material.
+.TP
+.B \-\-sbom
+Inventory software components and their versions.
+.TP
+.B \-\-cve
+Match the detected components against known vulnerabilities in the local
+mirror. Needs the mirror (see
+.BR \-\-fetch\-db ).
+.TP
+.B \-\-licenses
+Identify open-source licenses.
+.TP
+.BR \-A ", " \-\-all
+Run every pass. This is the default when no pass is named.
+.SS Output detail
+.TP
+.BR \-j ", " \-\-json
+Emit a single JSON object instead of the human-readable view. JSON always
+carries the complete result set. Use this when a tool or model will parse the
+output.
+.TP
+.B \-\-license\-paths
+List the file locations of each license, not just a count (human output).
+Implies
+.BR \-\-licenses .
+.TP
+.B \-\-component\-cves\-all
+Human view: list every component CVE, not just the high-signal set (on CISA
+KEV, or CVSS 9.0 and above, or EPSS 0.10 and above). Implies
+.BR \-\-cve .
+.TP
+.B \-\-kernel\-cves\-all
+List every CVE for the detected kernel version, matched branch-aware, instead
+of the curated high-signal checklist. Needs the kernel feed (see
+.BR \-\-with\-kernel\-feed ).
+Implies
+.BR \-\-cve .
+.TP
+.B \-\-dump\-kconfig
+Print the recovered kernel
+.I .config
+to stdout, then exit.
+.SS CVE mirror
+.TP
+.B \-\-fetch\-db
+Download a prebuilt CVE mirror and verify it against a published SHA-256, then
+exit. Needs
+.BR curl .
+This is the networked first-run step; see
+.B THE CVE MIRROR
+below.
+.TP
+.B \-\-update\-db
+Rebuild the local CVE mirror from the upstream feeds, then exit. Slower than
+.BR \-\-fetch\-db ;
+needs
+.B curl
+and
+.BR unzip .
+.TP
+.B \-\-with\-kernel\-feed
+Given with
+.B \-\-fetch\-db
+or
+.BR \-\-update\-db ,
+also fetch the optional full kernel.org (Linux CNA) CVE feed that backs
+.BR \-\-kernel\-cves\-all .
+.SS Configuration
+.TP
+.BI \-\-rules " FILE"
+Add user-defined detection rules from a JSON file.
+.TP
+.BR \-C ", " \-\-outdir " " \fIDIR\fR
+Write the JSON report to
+.IR DIR /mithril\-report.json .
+.TP
+.BI \-\-threads " N"
+Worker threads for tree scans. Default: automatic.
+.SS Information
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.B \-\-version
+Print version and exit.
+.SH THE CVE MIRROR
+The
+.B \-\-cve
+pass reads a local mirror under
+.B ~/.local/share/mithril
+(or
+.BR $MITHRIL_DB ),
+a compact memory-mapped index built from OSV.dev, the NVD 2.0 API, the CISA KEV
+catalog, and FIRST's EPSS scores. On a first run, populate it once with
+.B mithril \-\-fetch\-db
+before the first CVE scan. Without it,
+.B \-\-cve
+reports the missing database and exits nonzero. Only
+.B \-\-fetch\-db
+and
+.B \-\-update\-db
+ever touch the network; a normal scan does not.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Runtime error (for example, an unreadable target or a missing CVE mirror for
+.BR \-\-cve ).
+.TP
+.B 2
+Usage error (unknown option, missing argument).
+.SH ENVIRONMENT
+.TP
+.B MITHRIL_DB
+Path to the local CVE mirror (overrides the default under
+.BR ~/.local/share/mithril ).
+.TP
+.B MITHRIL_DB_URL
+Base URL that
+.B \-\-fetch\-db
+downloads the prebuilt mirror from.
+.TP
+.B NVD_API_KEY
+Optional NVD API key used by
+.B \-\-update\-db
+to raise the upstream rate limit. It works without one, just more slowly.
+.TP
+.B XDG_DATA_HOME
+If set,
+.B mithril
+locates the mirror under
+.B $XDG_DATA_HOME/mithril
+instead of
+.BR ~/.local/share/mithril .
+.TP
+.B NO_COLOR
+Disables bold section headers in
+.B \-\-help
+output.
+.SH FILES
+.TP
+.B ~/.local/share/mithril/
+Default location of the local CVE mirror (OSV plus NVD/CPE index, KEV, EPSS, and
+the optional kernel feed).
+.SH EXAMPLES
+.TP
+Run every analysis on an unpacked tree:
+.B mithril ./rootfs/
+.TP
+Only the secrets pass:
+.B mithril \-\-secrets ./rootfs/
+.TP
+JSON output for a tool or model:
+.B mithril \-j ./rootfs/
+.TP
+First run: download the CVE mirror:
+.B mithril \-\-fetch\-db
+.TP
+The full pipeline with moria:
+.B moria \-e firmware.bin && mithril firmware.bin.extracted/
+.SH SEE ALSO
+.BR moria (1),
+.BR trufflehog (1)
+.PP
+Full documentation: README.md and docs/ in the source tree
+.RB ( https://github.com/nmatt0/mithril ).
