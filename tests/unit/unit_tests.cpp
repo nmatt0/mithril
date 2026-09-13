@@ -13,7 +13,11 @@
 
 #include "ahocorasick.hpp"
 #include "binver.hpp"
+#include "boot.hpp"
+#include "bootkeys.hpp"
+#include "certid.hpp"
 #include "component.hpp"
+#include "fdt.hpp"
 #include "credstore.hpp"
 #include "derkey.hpp"
 #include "cve.hpp"
@@ -1467,6 +1471,70 @@ static void test_derkey() {
     }
 }
 
+static void test_boot() {
+    // scan_boot on a raw NUL-separated env region: finds the risky bootargs and
+    // the secret, ignores the benign vars.
+    auto append = [](std::vector<uint8_t>& v, const char* s) {
+        for (const char* p = s; *p; ++p) v.push_back(static_cast<uint8_t>(*p));
+        v.push_back(0);
+    };
+    std::vector<uint8_t> env(4, 0);  // fake 4-byte CRC header
+    append(env, "bootcmd=bootm 0x82000000");
+    append(env, "bootargs=console=ttyS0,115200 init=/bin/sh");
+    append(env, "baudrate=115200");
+    append(env, "admin_password=hunter2");
+    env.push_back(0);  // empty entry = terminator
+    auto fs = ft::scan_boot("env.bin", std::span<const uint8_t>(env.data(), env.size()));
+    CHECK(has_type(fs, "cmdline-init-shell"));
+    CHECK(has_type(fs, "uboot-env-secret"));
+
+    // Newline env only parses when the basename is uboot-env.txt.
+    std::string txt = "bootcmd=x\nbootargs=root=/dev/sda selinux=0\nbaudrate=1\nipaddr=1.2.3.4\n";
+    std::span<const uint8_t> tspan(reinterpret_cast<const uint8_t*>(txt.data()), txt.size());
+    CHECK(has_type(ft::scan_boot("uboot-env.txt", tspan), "cmdline-selinux-off"));
+    CHECK(ft::scan_boot("random.conf", tspan).empty());  // not uboot-env.txt -> no env parse
+
+    // AVB vbmeta: a 256-byte header with VERIFICATION_DISABLED + algorithm NONE.
+    std::vector<uint8_t> vb(256, 0);
+    vb[0] = 'A'; vb[1] = 'V'; vb[2] = 'B'; vb[3] = '0';
+    vb[123] = 0x02;  // flags (u32 BE) = VERIFICATION_DISABLED
+    auto vf = ft::scan_boot("vbmeta.img", std::span<const uint8_t>(vb.data(), vb.size()));
+    CHECK(has_type(vf, "avb-verification-disabled"));
+    CHECK(has_type(vf, "avb-unsigned"));
+    // A stray "AVB0" with an oversized auth block fails the consistency gate.
+    std::vector<uint8_t> vbad(256, 0);
+    vbad[0] = 'A'; vbad[1] = 'V'; vbad[2] = 'B'; vbad[3] = '0';
+    vbad[12] = 0xFF;  // auth_block_size huge -> blocks do not fit
+    CHECK(ft::scan_boot("vbmeta.img", std::span<const uint8_t>(vbad.data(), vbad.size())).empty());
+
+    // Boot key corpus: weak passwords match (case-insensitive), strong don't;
+    // the signing-key table makes no claim on an unknown fingerprint.
+    CHECK(ft::is_weak_password("admin") && ft::is_weak_password("ADMIN") &&
+          ft::is_weak_password(""));
+    CHECK(!ft::is_weak_password("Xk9$tr0ng-passphrase"));
+    CHECK(ft::known_signing_key("00000000000000000000000000000000") == nullptr);
+    // The X.509 cert corpus (compiled-in) matches a known AOSP platform test cert
+    // and the AMI PKfail PK; unknown fingerprints do not.
+    CHECK(ft::known_cert("c8a2e9bccf597c2fb6dc66bee293fc13") != nullptr);   // AOSP platform
+    CHECK(ft::known_cert("01adaf2c334e76a6479516daf6183818") != nullptr);   // AMI PKfail PK00
+    CHECK(ft::known_cert("00000000000000000000000000000000") == nullptr);
+    // EFI_SIGNATURE_LIST parse: a bogus/short blob yields no certs, no crash.
+    {
+        std::vector<uint8_t> junk(64, 0x11);
+        CHECK(ft::certs_in_efi_signature_list(
+                  std::span<const uint8_t>(junk.data(), junk.size())).empty());
+        CHECK(ft::cert_from_pkcs7(std::span<const uint8_t>(junk.data(), junk.size())).empty());
+    }
+
+    // FDT parser safety: garbage and truncated/invalid headers reject cleanly.
+    std::vector<uint8_t> junk(64, 0xAB);
+    CHECK(!ft::parse_fdt(std::span<const uint8_t>(junk.data(), junk.size())).has_value());
+    std::vector<uint8_t> badver = {0xD0, 0x0D, 0xFE, 0xED};  // right magic, nothing else
+    badver.resize(40, 0);
+    CHECK(!ft::parse_fdt(std::span<const uint8_t>(badver.data(), badver.size())).has_value());
+    CHECK(!ft::parse_fdt(std::span<const uint8_t>(junk.data(), 3)).has_value());  // too short
+}
+
 int main() {
     test_ahocorasick();
     test_entropy();
@@ -1506,6 +1574,7 @@ int main() {
     test_license();
     test_sbom_emit();
     test_sha256();
+    test_boot();
     std::printf("unit: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

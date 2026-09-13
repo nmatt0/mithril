@@ -48,10 +48,12 @@ void print_help(std::FILE* out, const char* prog, bool color) {
     std::fprintf(out, "%sOPTIONS%s\n", B, R);
     std::fprintf(out,
                  "  -j, --json          JSON output (default: human-readable)\n"
+                 "  -v, --verbose       Human output: show full values (no \"...\" truncation)\n"
                  "      --secrets       Scan file content for credential/key material\n"
                  "      --sbom          Inventory software components and versions\n"
                  "      --cve           Match components against known vulnerabilities\n"
                  "      --licenses      Identify open-source licenses\n"
+                 "      --boot          Boot-security intel: U-Boot env, device tree, FIT\n"
                  "      --license-paths  List the file locations of each license, not just\n"
                  "                       a count (human output; implies --licenses)\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
@@ -95,6 +97,7 @@ int main(int argc, char** argv) {
     bool kernel_cves_all = false;
     bool component_cves_all = false;
     bool license_paths = false;
+    bool verbose = false;
     bool with_kernel_feed = false;
     Passes passes;
     bool have_path = false;
@@ -127,6 +130,8 @@ int main(int argc, char** argv) {
             passes.cve = true;
         } else if (!end_of_opts && std::strcmp(a, "--licenses") == 0) {
             passes.licenses = true;
+        } else if (!end_of_opts && std::strcmp(a, "--boot") == 0) {
+            passes.boot = true;
         } else if (!end_of_opts && (std::strcmp(a, "-A") == 0 || std::strcmp(a, "--all") == 0)) {
             passes.all();
         } else if (!end_of_opts && (std::strcmp(a, "-C") == 0 || std::strcmp(a, "--outdir") == 0) &&
@@ -144,6 +149,8 @@ int main(int argc, char** argv) {
             component_cves_all = true;
         } else if (!end_of_opts && std::strcmp(a, "--license-paths") == 0) {
             license_paths = true;
+        } else if (!end_of_opts && (std::strcmp(a, "-v") == 0 || std::strcmp(a, "--verbose") == 0)) {
+            verbose = true;
         } else if (!end_of_opts && std::strcmp(a, "--with-kernel-feed") == 0) {
             with_kernel_feed = true;
         } else if (!end_of_opts && std::strcmp(a, "--rules") == 0 && i + 1 < argc) {
@@ -355,7 +362,7 @@ int main(int argc, char** argv) {
         std::snprintf(foot, sizeof(foot), "Scanned %zu file%s (%zu bytes) in %.3f s",
                       rep.file_count, rep.file_count == 1 ? "" : "s", rep.bytes_scanned, secs);
         bool color = isatty(fileno(stdout)) && !std::getenv("NO_COLOR");
-        std::string h = emit_report_human(rep, impl, foot, color, license_paths);
+        std::string h = emit_report_human(rep, impl, foot, color, license_paths, verbose);
         std::fwrite(h.data(), 1, h.size(), stdout);
     }
 

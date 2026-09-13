@@ -143,6 +143,11 @@ std::string make_summary(const Report& rep, const Passes& passes) {
         s += std::to_string(ids.size()) + " license";
         if (ids.size() != 1) s += "s";
     }
+    if (passes.boot && !rep.boot.empty()) {
+        if (!s.empty()) s += ", ";
+        s += std::to_string(rep.boot.size()) + " boot finding";
+        if (rep.boot.size() != 1) s += "s";
+    }
     if (s.empty()) s = "no findings";
     s += " across " + std::to_string(rep.file_count) + " file";
     if (rep.file_count != 1) s += "s";
@@ -380,6 +385,15 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
                 o += "\"";
             }
             o += "]}";
+        }
+        o += "]";
+    }
+
+    if (passes.boot) {
+        o += ",\"boot_security\":[";
+        for (size_t i = 0; i < rep.boot.size(); ++i) {
+            if (i) o += ",";
+            emit_hit(o, rep.boot[i]);
         }
         o += "]";
     }

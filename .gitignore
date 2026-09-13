@@ -7,8 +7,10 @@ fuzz/fuzz_secrets
 tests/samples/
 __pycache__/
 *.pyc
-# Vulnerability-feed mirrors and other large local data are not committed.
-data/
+# Vulnerability-feed mirrors and other large local data are not committed, but
+# the small vendored boot-key reference corpus (public keys/certs) is tracked.
+data/*
+!data/bootkeys/
 # Debian packaging build artifacts (debian/ sources are tracked; outputs are not)
 /debian/files
 /debian/*.substvars

@@ -46,6 +46,10 @@ add_executable(mithril
   src/license.cpp
   src/sbom.cpp
   src/sbom_emit.cpp
+  src/fdt.cpp
+  src/boot.cpp
+  src/bootkeys.cpp
+  src/certid.cpp
   src/walk.cpp
   src/json.cpp
   src/human.cpp
@@ -84,6 +88,10 @@ add_executable(mithril_unit
   src/license.cpp
   src/sbom.cpp
   src/sbom_emit.cpp
+  src/fdt.cpp
+  src/boot.cpp
+  src/bootkeys.cpp
+  src/certid.cpp
 )
 target_include_directories(mithril_unit PRIVATE src)
 
