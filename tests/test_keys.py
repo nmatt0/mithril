@@ -198,6 +198,20 @@ def main():
                             "-subj", "/CN=probe", "-out",
                             os.path.join(tree, "etc", "ssl", "healthy_cert.pem")],
                            cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # A weak (512-bit) cert wrapped in a UEFI EFI_SIGNATURE_LIST (as an
+            # extracted PK/db variable): --keys must unwrap the list, parse the
+            # cert, and flag the weak key.
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:512", "-nodes",
+                            "-keyout", "/dev/null", "-subj", "/CN=uefi-weak", "-outform", "DER",
+                            "-days", "1", "-out", "weakcert.der"],
+                           cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            wc = open(os.path.join(d, "weakcert.der"), "rb").read()
+            x509_guid = bytes([0xA1, 0x59, 0xC0, 0xA5, 0xE4, 0x94, 0xA7, 0x4A,
+                               0x87, 0xB5, 0xAB, 0x15, 0x5C, 0x2B, 0xF0, 0x72])
+            import struct
+            sigsize = 16 + len(wc)
+            esl = x509_guid + struct.pack("<III", 28 + sigsize, 0, sigsize) + b"\x00" * 16 + wc
+            open(os.path.join(tree, "etc", "ssl", "uefi_pk.esl"), "wb").write(esl)
 
         rep = run_json(binary, tree)
         kw = rep.get("key_weakness", [])
@@ -273,6 +287,10 @@ def main():
             # ROCA must not fire on the healthy key.
             if any(h["path"].endswith("healthy2048_pub.pem") for h in roca):
                 print("FAIL: ROCA false positive on a healthy 2048-bit key")
+                fails += 1
+            # UEFI EFI_SIGNATURE_LIST unwrap: the wrapped 512-bit cert is flagged.
+            if not on("uefi_pk.esl", "rsa-tiny-modulus"):
+                print("FAIL: weak key inside an EFI_SIGNATURE_LIST not flagged (unwrap failed)")
                 fails += 1
 
         # --- crash safety: truncations + mutations in the tree, must not crash ---

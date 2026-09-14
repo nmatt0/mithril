@@ -15,6 +15,7 @@
 
 #include "binver.hpp"
 #include "credstore.hpp"
+#include "boot.hpp"
 #include "engine.hpp"
 #include "keys.hpp"
 #include "filever.hpp"
@@ -53,7 +54,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     auto d12 = ft::inflate_raw(bytes);
     auto d13 = ft::scan_kconfig("k", bytes);
     auto d14 = ft::scan_keys("k.pem", bytes);  // public-key extractor (DER/SSH/base64)
+    auto d15 = ft::scan_boot("bios.bin", bytes);  // UEFI NVAR / EFI_SIGNATURE_LIST walkers
     (void)d14;
+    (void)d15;
     (void)d1;
     (void)d2;
     (void)d3;
