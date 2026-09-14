@@ -16,6 +16,7 @@
 #include "binver.hpp"
 #include "credstore.hpp"
 #include "engine.hpp"
+#include "keys.hpp"
 #include "filever.hpp"
 #include "inflate.hpp"
 #include "jsonparse.hpp"
@@ -51,6 +52,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     auto d11 = ft::gzip_inflate(bytes);
     auto d12 = ft::inflate_raw(bytes);
     auto d13 = ft::scan_kconfig("k", bytes);
+    auto d14 = ft::scan_keys("k.pem", bytes);  // public-key extractor (DER/SSH/base64)
+    (void)d14;
     (void)d1;
     (void)d2;
     (void)d3;

@@ -14,6 +14,7 @@
 
 #include <unistd.h>
 
+#include "bigint.hpp"
 #include "cve.hpp"
 #include "osvindex.hpp"
 #include "cveupdate.hpp"
@@ -54,6 +55,7 @@ void print_help(std::FILE* out, const char* prog, bool color) {
                  "      --cve           Match components against known vulnerabilities\n"
                  "      --licenses      Identify open-source licenses\n"
                  "      --boot          Boot-security intel: U-Boot env, device tree, FIT\n"
+                 "      --keys          Public-key weakness: leaked/default keys, ROCA, weak RSA\n"
                  "      --license-paths  List the file locations of each license, not just\n"
                  "                       a count (human output; implies --licenses)\n"
                  "  -A, --all           Run every pass (the default when none is selected)\n"
@@ -132,6 +134,8 @@ int main(int argc, char** argv) {
             passes.licenses = true;
         } else if (!end_of_opts && std::strcmp(a, "--boot") == 0) {
             passes.boot = true;
+        } else if (!end_of_opts && std::strcmp(a, "--keys") == 0) {
+            passes.keys = true;
         } else if (!end_of_opts && (std::strcmp(a, "-A") == 0 || std::strcmp(a, "--all") == 0)) {
             passes.all();
         } else if (!end_of_opts && (std::strcmp(a, "-C") == 0 || std::strcmp(a, "--outdir") == 0) &&
@@ -231,6 +235,50 @@ int main(int argc, char** argv) {
     }
 
     Report rep = scan_path(path, impl, threads, user.content, user.paths);
+
+    // Cross-file batch-GCD (the "weak Ps and Qs" shared-prime check): two distinct
+    // RSA moduli that share a prime factor are both factorable via GCD. Runs once
+    // over every RSA key found in the tree; a hit recovers a factor -> validated.
+    // Deduped by modulus (identical keys are a reuse issue, not a shared prime),
+    // and bounded so a huge key count cannot blow up the O(n^2) comparison.
+    if (impl.keys && rep.rsa_moduli.size() >= 2) {
+        // Pairwise GCD is O(n^2); cap the key count and skip oversized moduli so a
+        // hostile tree of many large keys cannot turn the scan into a DoS.
+        constexpr size_t kMaxGcdKeys = 256;
+        std::vector<size_t> uniq;  // one representative index per distinct modulus
+        {
+            std::set<std::string> seen;
+            for (size_t i = 0; i < rep.rsa_moduli.size() && uniq.size() < kMaxGcdKeys; ++i) {
+                if (rep.rsa_moduli[i].bits > 16384 || rep.rsa_moduli[i].n.empty()) continue;
+                std::string key(rep.rsa_moduli[i].n.begin(), rep.rsa_moduli[i].n.end());
+                if (seen.insert(std::move(key)).second) uniq.push_back(i);
+            }
+        }
+        std::vector<BigUint> N(uniq.size());
+        for (size_t u = 0; u < uniq.size(); ++u) N[u] = BigUint::from_be(rep.rsa_moduli[uniq[u]].n);
+        std::set<size_t> flagged;
+        auto flag = [&](size_t u, const std::string& other_path) {
+            const auto& m = rep.rsa_moduli[uniq[u]];
+            Finding f;
+            f.type = "shared-prime";
+            f.category = "keys";
+            f.offset = m.offset;
+            f.label = "RSA-" + std::to_string(m.bits) + " public-key";
+            f.description = "CWE-326 (shared prime from weak key generation)";
+            f.set_confidence(Confidence::Validated,
+                             "[high] shares a prime factor with the RSA key in " + other_path +
+                                 "; GCD recovers a factor of both moduli");
+            rep.keys.push_back({m.path, std::move(f)});
+        };
+        for (size_t i = 0; i < N.size(); ++i)
+            for (size_t j = i + 1; j < N.size(); ++j) {
+                BigUint g = BigUint::gcd(N[i], N[j]);
+                if (g > BigUint(1) && g < N[i] && g < N[j]) {
+                    if (flagged.insert(i).second) flag(i, rep.rsa_moduli[uniq[j]].path);
+                    if (flagged.insert(j).second) flag(j, rep.rsa_moduli[uniq[i]].path);
+                }
+            }
+    }
 
     // --dump-kconfig: emit the verbatim recovered .config (IKCONFIG or on-disk)
     // and exit. Nonzero when none was found so scripts can tell.

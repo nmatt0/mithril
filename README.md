@@ -2,7 +2,7 @@
 
 **IoT static scanner for secrets, SBOM, CVEs and more.**
 
-mithril analyzes the *contents* of firmware and IoT software, whether a single file or an unpacked rootfs. It looks for four things: embedded secrets and keys, a software bill of materials (SBOM), known CVEs affecting those components, and open-source licenses. It reports each finding with its evidence and a confidence, and it speaks clean JSON so scripts and LLM agents can drive it as easily as people can.
+mithril analyzes the *contents* of firmware and IoT software, whether a single file or an unpacked rootfs. It looks for embedded secrets and keys, a software bill of materials (SBOM), known CVEs affecting those components, open-source licenses, boot-security posture (U-Boot env, device tree, FIT/AVB/UEFI verified boot), and weak or leaked public keys (keys whose private half is public, ROCA, undersized RSA). It reports each finding with its evidence and a confidence, and it speaks clean JSON so scripts and LLM agents can drive it as easily as people can.
 
 A scan makes no network calls. Secrets, SBOM, and license analysis are fully offline, and the CVE pass reads a local vulnerability mirror you refresh out of band.
 
@@ -20,6 +20,7 @@ It has no build-time dependency on moria. Point it at any file or directory.
 - **Firmware-aware SBOM.** Beyond package databases (dpkg/opkg/apk/rpm), it recovers components from ELF version banners, versioned libc filenames, and the kernel banner, so it finds openssl/busybox/uClibc even in a stripped image with no package manager. Emitted as CycloneDX and SPDX.
 - **CVEs it owns end to end.** A local OSV + NVD/CPE mirror plus a curated, version- and kconfig-gated kernel-CVE checklist (high-signal, not exhaustive: an empty kernel result means none of the curated set is in range, not that the kernel is clean). Every match records how sure it is (exact version vs affected range vs CPE), stays release-precise where `/etc/os-release` allows, and is annotated with CISA KEV and EPSS.
 - **Honest by construction.** Secrets ride a deterministic offline ladder: `pattern` (shape), then `structural` (a parsed JWT or PEM key), then `validated` (a recomputed checksum, such as GitHub tokens and crypt hashes). mithril asserts well-formed, never "live," and an empty result is a real answer rather than a tool failure.
+- **Weak and leaked keys, proven offline.** For every public key it recovers (certs, SSH host/authorized keys, embedded keys) it checks whether the private half is obtainable: a fingerprint match against a compiled-in corpus of hardcoded/default keys whose private half is public (rapid7 ssh-badkeys, the Vagrant insecure key), the ROCA fingerprint (CVE-2017-15361), undersized/broken RSA, and factoring recoveries that hand you a factor outright (Fermat close primes, batch-GCD shared primes across the image, Wiener small-`d`) via a small in-tree bignum. A hit means impersonation, login, or forgery, not just a weak cipher suite.
 - **Fully offline and reproducible.** No network at scan time; the CVE mirror is refreshed by an explicit, separate step. Air-gappable.
 - **Safe on hostile input.** Untrusted bytes go through one bounds-checked reader. Parsers degrade to a clean error rather than crash, and the CVE index is memory-mapped so a scan never parses the whole thing.
 
@@ -47,6 +48,8 @@ mithril --cve --kernel-cves-all <dir>  # also list every kernel.org CVE for the 
 mithril --cve --component-cves-all <dir>  # human view: list every component CVE, not just high-signal (opt-in)
 mithril --licenses <dir>      # licenses only
 mithril --license-paths <dir> # licenses, with each license's file locations listed
+mithril --boot <dir>          # boot-security intel: U-Boot env, device tree, FIT/AVB/UEFI
+mithril --keys <dir>          # public-key weakness: leaked/default keys, ROCA, weak RSA, factoring
 mithril --rules my.json <dir> # add user-defined rules (docs/user-rules.md)
 mithril --fetch-db            # FIRST RUN: download the CVE mirror (a networked command)
 mithril --fetch-db --with-kernel-feed  # also fetch the optional full kernel.org CVE feed
@@ -56,7 +59,7 @@ mithril --help
 
 **First run:** the `--cve` pass needs a local vulnerability mirror, so run **`mithril --fetch-db`** once before your first CVE scan (details under [The CVE mirror](#the-cve-mirror)). Without it, `--cve` reports the missing DB and exits nonzero. Secrets, SBOM, and licenses are fully offline and need no setup.
 
-Naming any of `--secrets` / `--sbom` / `--cve` / `--licenses` runs just those. Naming none runs all four.
+Naming any of `--secrets` / `--sbom` / `--cve` / `--licenses` / `--boot` / `--keys` runs just those. Naming none runs them all.
 
 ## The CVE mirror
 

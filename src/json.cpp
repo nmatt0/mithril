@@ -148,6 +148,11 @@ std::string make_summary(const Report& rep, const Passes& passes) {
         s += std::to_string(rep.boot.size()) + " boot finding";
         if (rep.boot.size() != 1) s += "s";
     }
+    if (passes.keys && !rep.keys.empty()) {
+        if (!s.empty()) s += ", ";
+        s += std::to_string(rep.keys.size()) + " key finding";
+        if (rep.keys.size() != 1) s += "s";
+    }
     if (s.empty()) s = "no findings";
     s += " across " + std::to_string(rep.file_count) + " file";
     if (rep.file_count != 1) s += "s";
@@ -394,6 +399,15 @@ std::string emit_report_json(const Report& rep, const Passes& passes) {
         for (size_t i = 0; i < rep.boot.size(); ++i) {
             if (i) o += ",";
             emit_hit(o, rep.boot[i]);
+        }
+        o += "]";
+    }
+
+    if (passes.keys) {
+        o += ",\"key_weakness\":[";
+        for (size_t i = 0; i < rep.keys.size(); ++i) {
+            if (i) o += ",";
+            emit_hit(o, rep.keys[i]);
         }
         o += "]";
     }

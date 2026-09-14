@@ -8,9 +8,10 @@ tests/samples/
 __pycache__/
 *.pyc
 # Vulnerability-feed mirrors and other large local data are not committed, but
-# the small vendored boot-key reference corpus (public keys/certs) is tracked.
+# the small vendored reference corpora (public keys/certs) are tracked.
 data/*
 !data/bootkeys/
+!data/keycorpus/
 # Debian packaging build artifacts (debian/ sources are tracked; outputs are not)
 /debian/files
 /debian/*.substvars
