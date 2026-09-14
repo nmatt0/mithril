@@ -766,12 +766,19 @@ std::vector<Finding> scan_boot(const std::string& path, std::span<const uint8_t>
         return out;
     }
 
-    // 4. x86 UEFI firmware volume (Secure Boot variables). Gated on the FV
-    //    signature "_FVH" at offset 40 so only real UEFI images are scanned.
-    if (data.size() >= 44 && data[40] == '_' && data[41] == 'F' && data[42] == 'V' &&
-        data[43] == 'H') {
-        analyze_uefi(data, out);
-        return out;
+    // 4. x86 UEFI firmware image (Secure Boot variables). The FV header signature
+    //    "_FVH" sits at +40 of each firmware volume: at offset 40 for an image
+    //    that begins with an FV, but deeper in a full-flash / descriptor-prefixed
+    //    SPI dump (the low region is often padding). Search for it (bounded to the
+    //    first 64 MB — larger files are not BIOS images) and route to the UEFI
+    //    analyzer, which self-filters (emits nothing without a real variable store).
+    {
+        static const uint8_t kFvh[4] = {'_', 'F', 'V', 'H'};
+        std::span<const uint8_t> head = data.subspan(0, std::min<size_t>(data.size(), 64u << 20));
+        if (find_bytes(head, kFvh, 4, 0) != std::string::npos) {
+            analyze_uefi(data, out);
+            if (!out.empty()) return out;
+        }
     }
 
     // 4b. A standalone EFI_SIGNATURE_LIST: an extracted Secure Boot variable

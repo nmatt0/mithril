@@ -449,6 +449,14 @@ def main():
     check(bool(dbxh) and "5 revocation" in dbxh[0]["label"],
           "nvar+dbx: dbx revocations enumerated (5)")
 
+    # A full-flash SPI dump: the firmware volume sits at a nonzero offset (the low
+    # region is 0xFF pad), so "_FVH" is not at offset 40. The pass must still find
+    # it — this is how a real desktop BIOS image is laid out.
+    padded = b"\xff" * 0x4000 + nvar_store([("SecureBoot", b"\x01"), ("PK", b"PKCERT" * 40)])
+    ph = run("flash.bin", padded)
+    check("uefi-platform-key" in types(ph) and "uefi-secureboot-on" in types(ph),
+          "nvar: FV at a nonzero offset (full-flash dump) still analyzed")
+
     # PKFAIL through the NVAR store: PK is the AMI "DO NOT TRUST" test key.
     nvpk = nvar_store([("PK", efi_sig_list(ami_cert)), ("SecureBoot", b"\x01")])
     check("uefi-test-platform-key" in types(run("bios.bin", nvpk)),
