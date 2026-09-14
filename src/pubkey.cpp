@@ -12,6 +12,7 @@
 #include <optional>
 #include <string_view>
 
+#include "certid.hpp"
 #include "sha256.hpp"
 
 namespace ft {
@@ -412,6 +413,20 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
         if (auto k = parse_cert(data)) { set_label(*k); out.push_back(std::move(*k)); }
         else if (auto k2 = parse_pub_der(data, KeyOrigin::PublicKeyInfo)) {
             set_label(*k2); out.push_back(std::move(*k2));
+        }
+    }
+
+    // 4. EFI_SIGNATURE_LIST wrapper (an extracted UEFI Secure Boot variable —
+    //    PK/KEK/db): unwrap its X.509 certificates so their keys are analyzed too.
+    static const uint8_t kEfiCertX509[16] = {0xA1, 0x59, 0xC0, 0xA5, 0xE4, 0x94, 0xA7, 0x4A,
+                                             0x87, 0xB5, 0xAB, 0x15, 0x5C, 0x2B, 0xF0, 0x72};
+    if (data.size() >= 44 && std::equal(kEfiCertX509, kEfiCertX509 + 16, data.begin())) {
+        for (auto& der : certs_in_efi_signature_list(data)) {
+            if (auto k = parse_cert(der)) {
+                k->origin = KeyOrigin::Certificate;
+                set_label(*k);
+                out.push_back(std::move(*k));
+            }
         }
     }
 

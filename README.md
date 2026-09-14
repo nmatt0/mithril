@@ -48,7 +48,8 @@ mithril --cve --kernel-cves-all <dir>  # also list every kernel.org CVE for the 
 mithril --cve --component-cves-all <dir>  # human view: list every component CVE, not just high-signal (opt-in)
 mithril --licenses <dir>      # licenses only
 mithril --license-paths <dir> # licenses, with each license's file locations listed
-mithril --boot <dir>          # boot-security intel: U-Boot env, device tree, FIT/AVB/UEFI
+mithril --boot <dir>          # boot-security intel: U-Boot env, device tree, FIT/AVB, UEFI Secure Boot
+mithril --boot bios.bin       # UEFI Secure Boot posture from a raw AMI/EDK2 BIOS (docs/boot-security.md)
 mithril --keys <dir>          # public-key weakness: leaked/default keys, ROCA, weak RSA, factoring
 mithril --rules my.json <dir> # add user-defined rules (docs/user-rules.md)
 mithril --fetch-db            # FIRST RUN: download the CVE mirror (a networked command)

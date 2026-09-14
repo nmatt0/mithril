@@ -435,6 +435,29 @@ constexpr uint8_t kGlobalVar[16] = {0x61, 0xDF, 0xE4, 0x8B, 0xCA, 0x93, 0xD2, 0x
 constexpr uint8_t kImageSecDb[16] = {0xCB, 0xB2, 0x19, 0xD7, 0x3A, 0x3D, 0x96, 0x45,
                                      0xA3, 0xBC, 0xDA, 0xD0, 0x0E, 0x67, 0x65, 0x6F};
 
+// EFI_SIGNATURE_LIST signature-type GUIDs (on-disk bytes). A PK/KEK/db/dbx
+// variable's data is one or more concatenated lists of one of these types.
+constexpr uint8_t kCertX509[16]    = {0xA1, 0x59, 0xC0, 0xA5, 0xE4, 0x94, 0xA7, 0x4A,
+                                      0x87, 0xB5, 0xAB, 0x15, 0x5C, 0x2B, 0xF0, 0x72};
+constexpr uint8_t kCertSha256[16]  = {0x26, 0x16, 0xC4, 0xC1, 0x4C, 0x50, 0x92, 0x40,
+                                      0xAC, 0xA9, 0x41, 0xF9, 0x36, 0x93, 0x43, 0x28};
+constexpr uint8_t kCertSha1[16]    = {0x12, 0xA5, 0x6C, 0x82, 0x10, 0xCF, 0xC9, 0x4A,
+                                      0xB1, 0x87, 0xBE, 0x01, 0x49, 0x66, 0x31, 0xBD};
+constexpr uint8_t kCertRsa2048[16] = {0xE8, 0x66, 0x57, 0x3C, 0x9C, 0x26, 0x34, 0x4E,
+                                      0xAA, 0x14, 0xED, 0x77, 0x6E, 0x85, 0xB3, 0xB6};
+
+uint32_t le32_at(std::span<const uint8_t> d, size_t o) {
+    return uint32_t(d[o]) | (uint32_t(d[o + 1]) << 8) | (uint32_t(d[o + 2]) << 16) |
+           (uint32_t(d[o + 3]) << 24);
+}
+bool guid_at(std::span<const uint8_t> d, size_t off, const uint8_t g[16]) {
+    return off + 16 <= d.size() && std::equal(g, g + 16, d.begin() + off);
+}
+bool is_cert_type_guid(std::span<const uint8_t> d, size_t off) {
+    return guid_at(d, off, kCertX509) || guid_at(d, off, kCertSha256) ||
+           guid_at(d, off, kCertSha1) || guid_at(d, off, kCertRsa2048);
+}
+
 size_t find_bytes(std::span<const uint8_t> hay, const uint8_t* pat, size_t patlen, size_t from) {
     if (patlen == 0 || hay.size() < patlen) return std::string::npos;
     const void* p = memmem(hay.data() + from, hay.size() - from, pat, patlen);
@@ -452,111 +475,264 @@ std::string utf16_name(std::span<const uint8_t> b) {
     return s;
 }
 
-void analyze_uefi(std::span<const uint8_t> data, std::vector<Finding>& out) {
-    Reader r(data);
-    // Locate the variable store (authenticated or plain). It sits inside the
-    // EfiSystemNvData firmware volume, right after the FV header.
-    size_t store = find_bytes(data, kAuthVarStore, 16, 0);
-    if (store == std::string::npos) store = find_bytes(data, kVarStore, 16, 0);
-    if (store == std::string::npos) return;
-    // VARIABLE_STORE_HEADER: GUID(16), Size u32, Format u8, State u8.
-    auto fmt = r.at<uint8_t>(store + 20, Endian::Little);
-    if (!fmt || *fmt != 0x5A) return;  // not a FORMATTED store
+// Inventory of one or more concatenated EFI_SIGNATURE_LISTs: entry counts per
+// type and the DER bytes of each X.509 certificate.
+struct SigListInfo {
+    bool well_formed = false;
+    size_t x509 = 0, sha256 = 0, sha1 = 0, rsa2048 = 0;
+    std::vector<std::vector<uint8_t>> x509_certs;
+    size_t revocations() const { return x509 + sha256 + sha1 + rsa2048; }
+};
 
-    // Walk AUTHENTICATED_VARIABLE_HEADER entries (StartId 0x55AA).
+SigListInfo parse_siglists(std::span<const uint8_t> d) {
+    SigListInfo si;
+    size_t pos = 0;
+    for (int i = 0; i < 4096 && pos + 28 <= d.size(); ++i) {
+        if (!is_cert_type_guid(d, pos)) break;  // not (or no longer) a signature list
+        const size_t list_size = le32_at(d, pos + 16);
+        const size_t hdr = le32_at(d, pos + 20);
+        const size_t sig_size = le32_at(d, pos + 24);
+        if (list_size < 28 + hdr || sig_size <= 16 || list_size > d.size() - pos ||
+            sig_size > list_size)
+            break;
+        si.well_formed = true;
+        const size_t nsig = (list_size - 28 - hdr) / sig_size;
+        if (guid_at(d, pos, kCertX509)) {
+            size_t e = pos + 28 + hdr;
+            for (size_t k = 0; k < nsig && e + sig_size <= pos + list_size; ++k) {
+                const size_t coff = e + 16, clen = sig_size - 16;  // skip owner GUID
+                if (coff + clen <= d.size())
+                    si.x509_certs.emplace_back(d.begin() + coff, d.begin() + coff + clen);
+                e += sig_size;
+            }
+            si.x509 += nsig;
+        } else if (guid_at(d, pos, kCertSha256)) si.sha256 += nsig;
+        else if (guid_at(d, pos, kCertSha1)) si.sha1 += nsig;
+        else si.rsa2048 += nsig;
+        pos += list_size;
+    }
+    return si;
+}
+
+// Check each X.509 cert in a list against the compiled-in test/default signing-key
+// corpus (PKFAIL etc.). Emits a high finding per hit; sets `first_fp` to the first
+// cert's fingerprint (for the single-anchor correlation). Returns true on a hit.
+bool check_siglist_test_keys(const SigListInfo& si, const char* role, std::vector<Finding>& out,
+                             std::string& first_fp) {
+    bool hit = false;
+    for (const auto& der : si.x509_certs) {
+        std::string fp = cert_fingerprint(der);
+        if (first_fp.empty()) first_fp = fp;
+        if (const KnownKey* kt = known_cert(fp)) {
+            hit = true;
+            const char* type = std::string(role) == "PK" ? "uefi-test-platform-key" : "uefi-test-key";
+            out.push_back(mk(type, "high", std::string(role) + " = " + kt->label,
+                             std::string("UEFI ") + role + " contains a known test/default key (" +
+                                 kt->label + "); its private key is public (" + kt->ref +
+                                 "), so the Secure Boot chain is forgeable (PKFAIL)",
+                             "test/default key in " + std::string(role)));
+        }
+    }
+    return hit;
+}
+
+// The recovered Secure Boot variables (from whichever store format).
+struct SbVars {
     int setup_mode = -1, secure_boot = -1;
     bool pk = false, kek = false, db = false, dbx = false;
-    size_t db_size = 0, dbx_size = 0;
-    size_t pk_off = 0, pk_len = 0;
+    size_t pk_off = 0, pk_len = 0, kek_off = 0, kek_len = 0;
+    size_t db_off = 0, db_len = 0, dbx_off = 0, dbx_len = 0;
+    bool any() const { return pk || kek || db || dbx || setup_mode >= 0 || secure_boot >= 0; }
+};
+
+// EDK2 / OVMF authenticated variable store (AUTHENTICATED_VARIABLE_HEADER, 0x55AA).
+void walk_edk2_store(std::span<const uint8_t> data, size_t store, SbVars& v) {
+    Reader r(data);
+    auto fmt = r.at<uint8_t>(store + 20, Endian::Little);  // VARIABLE_STORE_HEADER format byte
+    if (!fmt || *fmt != 0x5A) return;
     size_t p = store + 28;
     const size_t end = data.size();
     for (int i = 0; i < 8192 && p + 60 <= end; ++i) {
         auto start_id = r.at<uint16_t>(p, Endian::Little);
-        if (!start_id || *start_id != 0x55AA) break;  // end of the used region
+        if (!start_id || *start_id != 0x55AA) break;
         auto state = r.at<uint8_t>(p + 2, Endian::Little);
         auto name_size = r.at<uint32_t>(p + 36, Endian::Little);
         auto data_size = r.at<uint32_t>(p + 40, Endian::Little);
         auto vguid = r.bytes(p + 44, 16);
         if (!state || !name_size || !data_size || !vguid) break;
-        const size_t name_at = p + 60;
-        const size_t data_at = name_at + *name_size;
-        if (*name_size > (4u << 10) || *data_size > (16u << 20)) break;
-        if (data_at + *data_size > end) break;
-        // Only VAR_ADDED (0x3F) entries are live.
-        if (*state == 0x3F) {
+        const size_t name_at = p + 60, data_at = name_at + *name_size;
+        if (*name_size > (4u << 10) || *data_size > (16u << 20) || data_at + *data_size > end) break;
+        if (*state == 0x3F) {  // VAR_ADDED (live)
             std::string name = utf16_name(*r.bytes(name_at, *name_size));
             const bool global = std::equal(kGlobalVar, kGlobalVar + 16, vguid->begin());
             const bool imgsec = std::equal(kImageSecDb, kImageSecDb + 16, vguid->begin());
             auto val1 = [&]() -> int {
-                auto v = r.at<uint8_t>(data_at, Endian::Little);
-                return v ? *v : -1;
+                auto x = r.at<uint8_t>(data_at, Endian::Little);
+                return x ? *x : -1;
             };
-            if (global && name == "SetupMode") setup_mode = val1();
-            else if (global && name == "SecureBoot") secure_boot = val1();
-            else if (global && name == "PK") {
-                pk = *data_size > 0;
-                pk_off = data_at;
-                pk_len = *data_size;
-            } else if (global && name == "KEK") kek = *data_size > 0;
-            else if (imgsec && name == "db") { db = true; db_size = *data_size; }
-            else if (imgsec && name == "dbx") { dbx = true; dbx_size = *data_size; }
+            if (global && name == "SetupMode") v.setup_mode = val1();
+            else if (global && name == "SecureBoot") v.secure_boot = val1();
+            else if (global && name == "PK") { v.pk = true; v.pk_off = data_at; v.pk_len = *data_size; }
+            else if (global && name == "KEK") { v.kek = true; v.kek_off = data_at; v.kek_len = *data_size; }
+            else if (imgsec && name == "db") { v.db = true; v.db_off = data_at; v.db_len = *data_size; }
+            else if (imgsec && name == "dbx") { v.dbx = true; v.dbx_off = data_at; v.dbx_len = *data_size; }
         }
-        // Advance to the next entry, 4-byte aligned.
         size_t next = (data_at + *data_size + 3) & ~size_t(3);
         if (next <= p) break;
         p = next;
     }
+}
 
-    // Posture.
-    if (secure_boot == 0)
-        out.push_back(mk("uefi-secureboot-off", "high", "SecureBoot=0",
-                         "UEFI Secure Boot is disabled", "secure boot off"));
-    if (setup_mode == 1 || !pk)
-        out.push_back(mk("uefi-setup-mode", "high", pk ? "SetupMode=1" : "no PK",
-                         "Secure Boot is in Setup Mode / no Platform Key: arbitrary keys can be enrolled",
-                         "no platform key enrolled"));
-    if (pk) {
-        // Fingerprint the embedded X.509 cert (the PK variable data is an
-        // EFI_SIGNATURE_LIST), and match it against the known test/default keys.
-        std::string pk_fp;
-        const KnownKey* pk_known = nullptr;
-        if (auto b = r.bytes(pk_off, pk_len)) {
-            auto certs = certs_in_efi_signature_list(*b);
-            if (!certs.empty()) {
-                pk_fp = cert_fingerprint(certs.front());
-                pk_known = known_cert(pk_fp);
-            } else {
-                pk_fp = sha256_hex(*b).substr(0, 32);  // fallback: whole PK data
+// AMI NVAR variable store (what most vendor BIOSes use, not the EDK2 format).
+// Entry header: 'NVAR'(4), size(u16 LE), next(3), attributes(u8). Attribute bits:
+// VALID 0x80, ASCII_NAME 0x02, GUID_INLINE 0x04, DATA_ONLY 0x08. After the header
+// comes a 16-byte inline GUID or a 1-byte GUID-store index, then the (ASCII/UCS2)
+// name, then the variable data (an EFI_SIGNATURE_LIST for PK/KEK/db/dbx). The
+// latest valid entry for a name wins; the siglist parser self-bounds, so the
+// trailing extended-header/auth metadata of the entry is harmless.
+void walk_nvar_store(std::span<const uint8_t> data, SbVars& v) {
+    static const uint8_t kNvar[4] = {'N', 'V', 'A', 'R'};
+    size_t base = find_bytes(data, kNvar, 4, 0);
+    if (base == std::string::npos) return;
+    const size_t end = data.size();
+    size_t pos = base;
+    for (int i = 0; i < 65536 && pos + 10 <= end; ++i) {
+        if (!(data[pos] == 'N' && data[pos + 1] == 'V' && data[pos + 2] == 'A' &&
+              data[pos + 3] == 'R')) { ++pos; continue; }
+        const uint16_t size = uint16_t(data[pos + 4]) | (uint16_t(data[pos + 5]) << 8);
+        const uint8_t attr = data[pos + 9];
+        if (size < 11 || size == 0xFFFF || pos + size > end) { ++pos; continue; }
+        if ((attr & 0x80) && !(attr & 0x08)) {  // valid, carries a name (not data-only)
+            const size_t goff = pos + 10 + ((attr & 0x04) ? 16 : 1);
+            std::string name;
+            size_t j = goff;
+            if (attr & 0x02) {  // ASCII name
+                while (j < pos + size && data[j]) {
+                    if (data[j] >= 0x20 && data[j] < 0x7F) name.push_back(char(data[j]));
+                    ++j;
+                }
+                ++j;  // NUL
+            } else {  // UCS2 name
+                while (j + 1 < pos + size && (data[j] || data[j + 1])) {
+                    uint16_t c = data[j] | (data[j + 1] << 8);
+                    if (c >= 0x20 && c < 0x7F) name.push_back(char(c));
+                    j += 2;
+                }
+                j += 2;
+            }
+            const size_t data_off = j;
+            if (data_off <= pos + size) {
+                const size_t dlen = pos + size - data_off;
+                if (name == "PK") { v.pk = true; v.pk_off = data_off; v.pk_len = dlen; }
+                else if (name == "KEK") { v.kek = true; v.kek_off = data_off; v.kek_len = dlen; }
+                else if (name == "db") { v.db = true; v.db_off = data_off; v.db_len = dlen; }
+                else if (name == "dbx") { v.dbx = true; v.dbx_off = data_off; v.dbx_len = dlen; }
+                else if (name == "SetupMode" && data_off < end) v.setup_mode = data[data_off];
+                else if (name == "SecureBoot" && data_off < end) v.secure_boot = data[data_off];
             }
         }
-        std::string why = "UEFI Platform Key enrolled";
-        const char* sev = "info";
-        std::string label = pk_fp.empty() ? "PK" : "PK cert sha256:" + pk_fp;
-        if (pk_known) {
-            why = std::string("UEFI Platform Key is a known test/default key (") + pk_known->label +
-                  "); its private key is public (" + pk_known->ref +
-                  "), so Secure Boot is trivially bypassable (PKFAIL)";
-            sev = "high";
-            label = std::string("PK = ") + pk_known->label;
-        }
-        out.push_back(mk(pk_known ? "uefi-test-platform-key" : "uefi-platform-key", sev, label, why,
-                         "platform key"));
+        pos += size;
     }
-    if (secure_boot == 1 && pk)
+}
+
+// Emit the Secure Boot posture findings from recovered variables.
+void emit_sb_posture(std::span<const uint8_t> data, const SbVars& v, std::vector<Finding>& out) {
+    Reader r(data);
+    auto listof = [&](size_t off, size_t len) -> SigListInfo {
+        auto b = r.bytes(off, len);
+        return b ? parse_siglists(*b) : SigListInfo{};
+    };
+
+    if (v.secure_boot == 0)
+        out.push_back(mk("uefi-secureboot-off", "high", "SecureBoot=0",
+                         "UEFI Secure Boot is disabled", "secure boot off"));
+    if (v.setup_mode == 1 || !v.pk)
+        out.push_back(mk("uefi-setup-mode", "high", v.pk ? "SetupMode=1" : "no PK",
+                         "Secure Boot is in Setup Mode / no Platform Key: arbitrary keys can be enrolled",
+                         "no platform key enrolled"));
+
+    std::string pk_fp, kek_fp, db_fp;
+    if (v.pk) {
+        SigListInfo si = listof(v.pk_off, v.pk_len);
+        if (!check_siglist_test_keys(si, "PK", out, pk_fp)) {
+            if (pk_fp.empty() && v.pk_len)  // no X.509 cert parsed: fingerprint the raw data
+                if (auto b = r.bytes(v.pk_off, v.pk_len)) pk_fp = sha256_hex(*b).substr(0, 32);
+            out.push_back(mk("uefi-platform-key", "info", pk_fp.empty() ? "PK" : "PK cert sha256:" + pk_fp,
+                             "UEFI Platform Key enrolled", "platform key"));
+        }
+    }
+    if (v.kek) { SigListInfo si = listof(v.kek_off, v.kek_len); check_siglist_test_keys(si, "KEK", out, kek_fp); }
+    if (v.db)  { SigListInfo si = listof(v.db_off, v.db_len);   check_siglist_test_keys(si, "db", out, db_fp); }
+
+    if (v.secure_boot == 1 && v.pk)
         out.push_back(mk("uefi-secureboot-on", "info",
-                         std::string("SecureBoot=1") + (kek ? ", KEK present" : ""),
+                         std::string("SecureBoot=1") + (v.kek ? ", KEK present" : ""),
                          "UEFI Secure Boot enabled with a Platform Key", "secure boot on"));
-    if (dbx && dbx_size < 512)
-        out.push_back(mk("uefi-dbx-empty", "medium", "dbx=" + std::to_string(dbx_size) + "B",
-                         "the revocation database (dbx) is empty/minimal: known-bad bootloaders are not revoked",
-                         "no dbx revocations"));
-    else if (!dbx && (db || pk))
+    else if (v.pk && v.secure_boot < 0)
+        out.push_back(mk("uefi-secureboot-on", "info",
+                         std::string("PK enrolled") + (v.kek ? ", KEK present" : "") +
+                             (v.db ? ", db present" : ""),
+                         "Secure Boot is provisioned (Platform Key enrolled); runtime SecureBoot "
+                         "state is not stored in the image", "secure boot provisioned"));
+
+    // A single certificate serving as PK, the only KEK, and the only db entry is a
+    // single point of compromise for the whole chain.
+    if (!pk_fp.empty() && pk_fp == kek_fp && pk_fp == db_fp)
+        out.push_back(mk("uefi-single-anchor", "medium", "PK = KEK = db",
+                         "the same certificate is the Platform Key, the sole KEK, and the sole db "
+                         "entry: one key anchors the entire Secure Boot chain (single point of compromise)",
+                         "single-key secure boot chain"));
+
+    // dbx currency (gap: enumerate revocations, not just size).
+    if (v.dbx) {
+        SigListInfo si = listof(v.dbx_off, v.dbx_len);
+        size_t revs = si.revocations();
+        if (!si.well_formed || revs == 0)
+            out.push_back(mk("uefi-dbx-empty", "medium", "dbx empty",
+                             "the revocation database (dbx) is empty: known-bad bootloaders are not revoked",
+                             "no dbx revocations"));
+        else
+            out.push_back(mk("uefi-dbx", "info", "dbx: " + std::to_string(revs) + " revocation(s)",
+                             "dbx revocation database present (" + std::to_string(revs) +
+                                 " entr" + (revs == 1 ? "y" : "ies") + ")", "dbx revocations"));
+    } else if (v.db || v.pk) {
         out.push_back(mk("uefi-dbx-empty", "medium", "no dbx",
                          "no revocation database (dbx): known-bad bootloaders are not revoked",
                          "no dbx revocations"));
-    (void)db;
-    (void)db_size;
-    (void)kek;
+    }
+}
+
+// Analyze a UEFI firmware image / variable-store region. Tries the EDK2 store
+// first, then the AMI NVAR store (most vendor BIOSes), then emits posture.
+void analyze_uefi(std::span<const uint8_t> data, std::vector<Finding>& out) {
+    SbVars v;
+    size_t store = find_bytes(data, kAuthVarStore, 16, 0);
+    if (store == std::string::npos) store = find_bytes(data, kVarStore, 16, 0);
+    if (store != std::string::npos) walk_edk2_store(data, store, v);
+    if (!v.any()) walk_nvar_store(data, v);  // fall back to the AMI NVAR format
+    if (!v.any()) return;
+    emit_sb_posture(data, v, out);
+}
+
+// Analyze a standalone EFI_SIGNATURE_LIST file (an extracted Secure Boot variable
+// — PK/KEK/db/dbx from UEFITool/chipsec). Reports its inventory and any test/
+// default signing-key hit; the key-weakness pass covers the certs' key strength.
+void analyze_siglist_file(const SigListInfo& si, std::vector<Finding>& out) {
+    std::string counts;
+    auto add = [&](size_t n, const std::string& sing, const std::string& plur) {
+        if (!n) return;
+        if (!counts.empty()) counts += ", ";
+        counts += std::to_string(n) + " " + (n == 1 ? sing : plur);
+    };
+    add(si.x509, "X.509 cert", "X.509 certs");
+    add(si.sha256, "SHA-256 hash", "SHA-256 hashes");
+    add(si.sha1, "SHA-1 hash", "SHA-1 hashes");
+    add(si.rsa2048, "RSA-2048 key", "RSA-2048 keys");
+    if (counts.empty()) counts = "0 entries";
+    out.push_back(mk("uefi-siglist", "info", counts,
+                     "UEFI Secure Boot signature list (" + counts + ")", "efi signature list"));
+    std::string fp;
+    check_siglist_test_keys(si, "signature list", out, fp);
 }
 
 }  // namespace
@@ -596,6 +772,17 @@ std::vector<Finding> scan_boot(const std::string& path, std::span<const uint8_t>
         data[43] == 'H') {
         analyze_uefi(data, out);
         return out;
+    }
+
+    // 4b. A standalone EFI_SIGNATURE_LIST: an extracted Secure Boot variable
+    //     (PK/KEK/db/dbx from UEFITool/chipsec). Its content begins with a
+    //     signature-type GUID and parses as a well-formed list.
+    if (data.size() >= 28 && is_cert_type_guid(data, 0)) {
+        SigListInfo si = parse_siglists(data);
+        if (si.well_formed) {
+            analyze_siglist_file(si, out);
+            return out;
+        }
     }
 
     // 5. Android/OTA code-signing certificate: an APK/OTA PKCS#7 signature block

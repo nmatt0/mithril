@@ -252,6 +252,44 @@ def efi_sig_list(cert):
     return X509GUID + struct.pack("<III", 28 + sigsize, 0, sigsize) + b"\x00" * 16 + cert
 
 
+SHA256GUID = bytes([0x26, 0x16, 0xC4, 0xC1, 0x4C, 0x50, 0x92, 0x40,
+                    0xAC, 0xA9, 0x41, 0xF9, 0x36, 0x93, 0x43, 0x28])
+
+
+def sha256_siglist(n):
+    sigsize = 16 + 32  # owner GUID + SHA-256 hash
+    entries = b"".join(b"\x00" * 16 + bytes([i & 0xFF]) * 32 for i in range(n))
+    return SHA256GUID + struct.pack("<III", 28 + len(entries), 0, sigsize) + entries
+
+
+def _fv(body):
+    """Wrap a body in a minimal UEFI firmware volume (so the FV branch dispatches)."""
+    hlen = 0x48
+    h = bytearray(hlen)
+    h[16:32] = _NVDATA
+    struct.pack_into("<Q", h, 32, hlen + len(body))
+    h[40:44] = b"_FVH"
+    struct.pack_into("<I", h, 44, 0x4FE)
+    struct.pack_into("<H", h, 48, hlen)
+    h[55] = 2
+    s = sum(struct.unpack_from("<%dH" % (hlen // 2), h))
+    struct.pack_into("<H", h, 50, (-s) & 0xFFFF)
+    return bytes(h) + body
+
+
+def _nvar_entry(name, data, attr=0x82):
+    # AMI NVAR: 'NVAR' size(u16) next(3) attr(u8), then 1-byte GUID index (attr&4==0),
+    # ASCII name + NUL (attr&2), then data. attr 0x82 = VALID|ASCII_NAME.
+    body = b"\x00" + name.encode() + b"\x00" + data
+    size = 10 + len(body)
+    return b"NVAR" + struct.pack("<H", size) + b"\xff\xff\xff" + bytes([attr]) + body
+
+
+def nvar_store(variables):
+    """A synthetic AMI NVAR variable store in an FV. variables: [(name, data)]."""
+    return _fv(b"".join(_nvar_entry(n, d) for (n, d) in variables))
+
+
 def env_text():
     return b"\n".join(ENV_VARS) + b"\n"
 
@@ -398,6 +436,33 @@ def main():
           "apk: AOSP platform test cert (PEM) detected")
     h = run("CERT.RSA", AMI_P7)
     check("apk-test-signing-cert" in types(h), "apk: PKCS#7 signature block cert matched")
+
+    # --- AMI NVAR variable store (the format most vendor BIOSes use) ---
+    ami_cert = _cert_from_p7(AMI_P7)
+    nv = nvar_store([("SecureBoot", b"\x01"), ("SetupMode", b"\x00"),
+                     ("PK", b"PKCERT" * 40), ("KEK", b"KEK" * 30),
+                     ("db", b"DB" * 300), ("dbx", sha256_siglist(5))])
+    h = run("bios.bin", nv)
+    check("uefi-platform-key" in types(h), "nvar: PK recovered from AMI NVAR store")
+    check("uefi-secureboot-on" in types(h), "nvar: SecureBoot/PK posture from NVAR")
+    dbxh = [x for x in h if x["type"] == "uefi-dbx"]
+    check(bool(dbxh) and "5 revocation" in dbxh[0]["label"],
+          "nvar+dbx: dbx revocations enumerated (5)")
+
+    # PKFAIL through the NVAR store: PK is the AMI "DO NOT TRUST" test key.
+    nvpk = nvar_store([("PK", efi_sig_list(ami_cert)), ("SecureBoot", b"\x01")])
+    check("uefi-test-platform-key" in types(run("bios.bin", nvpk)),
+          "nvar+pkfail: AMI test PK detected via the NVAR store")
+
+    # --- standalone EFI_SIGNATURE_LIST (an extracted PK/KEK/db/dbx variable) ---
+    sl = run("PK.bin", efi_sig_list(ami_cert))
+    check("uefi-siglist" in types(sl) and "1 X.509 cert" in sl[0]["label"],
+          "siglist: standalone X.509 signature list inventoried")
+    check("uefi-test-key" in types(sl), "siglist: test/default key matched in a standalone list")
+    dbxsl = run("dbx.bin", sha256_siglist(371))
+    slh = [x for x in dbxsl if x["type"] == "uefi-siglist"]
+    check(bool(slh) and "371 SHA-256 hashes" in slh[0]["label"],
+          "siglist: SHA-256 revocation list counted (371)")
 
     # --- FP guards ---
     h = run("app.conf", b"A=1\nB=2\nC=3\nD=4\nE=5\n")
