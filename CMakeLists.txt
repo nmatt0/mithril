@@ -110,6 +110,49 @@ target_include_directories(mithril_unit PRIVATE src)
 add_executable(mkosvindex tests/mkosvindex.cpp src/osvindex.cpp)
 target_include_directories(mkosvindex PRIVATE src)
 
+enable_testing()
+add_test(NAME mithril_unit COMMAND mithril_unit)
+
+# The Python drivers are the bulk of the regression gate (per-detector
+# identify/extract checks over synthetic corpora), mirroring tests/run.sh. Most
+# take the built binary path as argv[1]; test_boot and the two generator
+# consistency checks take none. Each self-skips cleanly (exit 0) when an
+# optional tool (e.g. openssl) is absent, so they are safe to register
+# unconditionally. They need a Python 3 interpreter; without one only
+# mithril_unit above is run.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  # Corpus/generator consistency checks and test_boot: no binary argument.
+  add_test(NAME gen_bootkeys
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_bootkeys.py --check
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME gen_keycorpus
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_keycorpus.py --check
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_boot
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_boot.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # These take the freshly built binary as argv[1].
+  set(_mithril_py_tests
+    test_secrets
+    test_der_keys
+    test_keys
+    test_sbom
+    test_cve
+    test_licenses
+    test_kconfig
+    test_kconfig_recovery
+    test_kernelfeed
+  )
+  foreach(_t IN LISTS _mithril_py_tests)
+    add_test(
+      NAME ${_t}
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${_t}.py $<TARGET_FILE:mithril>
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+  endforeach()
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS mithril RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES mithril.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 OPTIONAL)
