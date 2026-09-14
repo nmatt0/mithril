@@ -49,7 +49,7 @@ human-readable by default; pass
 for a single JSON object designed to be consumed by a tool or model.
 .PP
 With no pass flag, every pass runs. Naming one or more passes
-.RB ( \-\-secrets ", " \-\-sbom ", " \-\-cve ", " \-\-licenses )
+.RB ( \-\-secrets ", " \-\-sbom ", " \-\-cve ", " \-\-licenses ", " \-\-boot ", " \-\-keys )
 restricts the run to those.
 .SH ARGUMENTS
 .TP
@@ -73,6 +73,13 @@ mirror. Needs the mirror (see
 .TP
 .B \-\-licenses
 Identify open-source licenses.
+.TP
+.B \-\-boot
+Boot-security intel: U-Boot environment, device tree, and FIT/AVB/UEFI verified-boot posture.
+.TP
+.B \-\-keys
+Public-key weakness: keys whose private half is public (hardcoded/default keys),
+the ROCA fingerprint (CVE-2017-15361), and undersized or broken RSA keys.
 .TP
 .BR \-A ", " \-\-all
 Run every pass. This is the default when no pass is named.

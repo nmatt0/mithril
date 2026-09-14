@@ -667,6 +667,74 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
         }
     }
 
+    // ---- key weakness ----
+    if (passes.keys) {
+        if (passes.secrets || passes.sbom || passes.cve || passes.licenses || passes.boot)
+            o += "\n";
+        o += a.bold();
+        o += std::to_string(rep.keys.size());
+        o += rep.keys.size() == 1 ? " key finding" : " key findings";
+        o += a.reset();
+        o += "\n\n";
+        if (rep.keys.empty()) {
+            o += "  no public keys with a known weakness found\n";
+        } else {
+            auto sev_rank = [](const std::string& ev) {
+                if (ev.rfind("[high]", 0) == 0) return 0;
+                if (ev.rfind("[medium]", 0) == 0) return 1;
+                return 2;
+            };
+            std::vector<const Hit*> rows;
+            rows.reserve(rep.keys.size());
+            for (const auto& h : rep.keys) rows.push_back(&h);
+            std::stable_sort(rows.begin(), rows.end(), [&](const Hit* x, const Hit* y) {
+                int rx = sev_rank(x->finding.evidence), ry = sev_rank(y->finding.evidence);
+                if (rx != ry) return rx < ry;
+                return x->finding.type < y->finding.type;
+            });
+            size_t wtype = 4;
+            for (const Hit* h : rows) wtype = std::max(wtype, h->finding.type.size());
+            wtype = std::min<size_t>(wtype, 26);
+            // Collapse identical (type, value) findings (e.g. many legacy 1024-bit
+            // roots in one CA bundle) into one row plus a count.
+            auto key = [](const Hit* h) { return h->finding.type + "\x1f" + h->finding.label; };
+            std::unordered_map<std::string, int> counts;
+            for (const Hit* h : rows) counts[key(h)]++;
+            std::unordered_set<std::string> shown;
+            for (const Hit* h : rows) {
+                if (!shown.insert(key(h)).second) continue;
+                const int n = counts[key(h)];
+                const std::string& ev = h->finding.evidence;
+                int r = sev_rank(ev);
+                const char* tag = r == 0 ? "high" : (r == 1 ? "med " : "info");
+                const char* col = r == 0 ? a.red() : (r == 1 ? a.yellow() : a.dim());
+                size_t close = ev.find(']');
+                std::string reason = close != std::string::npos ? ev.substr(close + 2) : ev;
+                o += "  ";
+                o += col;
+                o += tag;
+                o += a.reset();
+                o += "  ";
+                o += a.cyan();
+                pad(o, clip(h->finding.type, wtype), wtype);
+                o += a.reset();
+                o += "  ";
+                o += reason;
+                if (n > 1) o += " (\xc3\x97" + std::to_string(n) + ")";
+                o += "\n";
+                if (!h->finding.label.empty()) {
+                    o += "        ";
+                    o += a.dim();
+                    o += clip(h->finding.label, kValueWidth);
+                    o += "  (" + h->path + (n > 1 ? ", +" + std::to_string(n - 1) + " more" : "") +
+                         ")";
+                    o += a.reset();
+                    o += "\n";
+                }
+            }
+        }
+    }
+
     // ---- footer ----
     if (!footer.empty()) {
         o += "\n";

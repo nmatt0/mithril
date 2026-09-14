@@ -50,6 +50,11 @@ add_executable(mithril
   src/boot.cpp
   src/bootkeys.cpp
   src/certid.cpp
+  src/pubkey.cpp
+  src/bigint.cpp
+  src/keyweak.cpp
+  src/keycorpus.cpp
+  src/keys.cpp
   src/walk.cpp
   src/json.cpp
   src/human.cpp
@@ -92,6 +97,11 @@ add_executable(mithril_unit
   src/boot.cpp
   src/bootkeys.cpp
   src/certid.cpp
+  src/pubkey.cpp
+  src/bigint.cpp
+  src/keyweak.cpp
+  src/keycorpus.cpp
+  src/keys.cpp
 )
 target_include_directories(mithril_unit PRIVATE src)
 

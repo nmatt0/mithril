@@ -17,10 +17,14 @@ echo "== unit tests =="
 
 echo "== integration: secrets =="
 python3 tools/gen_bootkeys.py --check
+python3 tools/gen_keycorpus.py --check
 python3 tests/test_secrets.py "./$BUILD/mithril"
 
 echo "== integration: der private keys =="
 python3 tests/test_der_keys.py "./$BUILD/mithril"
+
+echo "== integration: key weakness (leaked/ROCA/weak public keys) =="
+python3 tests/test_keys.py "./$BUILD/mithril"
 
 echo "== integration: sbom =="
 python3 tests/test_sbom.py "./$BUILD/mithril"

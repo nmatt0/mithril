@@ -25,8 +25,9 @@ struct Passes {
     bool cve = false;
     bool licenses = false;
     bool boot = false;
-    bool any() const { return secrets || sbom || cve || licenses || boot; }
-    void all() { secrets = sbom = cve = licenses = boot = true; }
+    bool keys = false;
+    bool any() const { return secrets || sbom || cve || licenses || boot || keys; }
+    void all() { secrets = sbom = cve = licenses = boot = keys = true; }
 };
 
 // One finding together with the file it was found in (path relative to the root).
@@ -61,6 +62,19 @@ struct Report {
     bool component_cves_all = false;    // --component-cves-all: show every component CVE in human view
     std::vector<Hit> licenses;          // license findings (SPDX tags + license files)
     std::vector<Hit> boot;              // boot-security findings (U-Boot env, DTB/FIT)
+    std::vector<Hit> keys;              // key-weakness findings (leaked/ROCA/weak public keys)
+
+    // Every RSA public key found in the tree, kept for the cross-file batch-GCD
+    // shared-prime check (run once after the walk; a shared factor between two
+    // moduli factors both). path is where the key was found.
+    struct RsaModulusRef {
+        std::string path;
+        size_t offset = 0;
+        std::vector<uint8_t> n;
+        uint64_t e = 0;
+        size_t bits = 0;
+    };
+    std::vector<RsaModulusRef> rsa_moduli;
 
     // Files that could not be read (path -> reason), surfaced for honesty.
     std::vector<std::pair<std::string, std::string>> errors;

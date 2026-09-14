@@ -13,6 +13,7 @@
 #include "boot.hpp"
 #include "credstore.hpp"
 #include "derkey.hpp"
+#include "keys.hpp"
 #include "engine.hpp"
 #include "file_map.hpp"
 #include "filever.hpp"
@@ -42,6 +43,8 @@ struct FileHits {
     std::vector<Component> components;
     std::vector<Finding> licenses;
     std::vector<Finding> boot;       // boot-security findings
+    std::vector<Finding> keys;       // key-weakness findings
+    std::vector<RsaKeyInfo> rsa_keys;  // RSA public keys (for cross-file batch-GCD)
     std::string distro_id, distro_version;  // parsed if this file is os-release
     bool has_kconfig = false;
     KernelConfigView kcv;  // per-file config knowledge (merged into the report)
@@ -165,6 +168,7 @@ FileHits scan_one(const fs::path& path, const fs::path& root, const Passes& pass
     }
     if (passes.licenses) fh.licenses = scan_licenses(fh.path, fm.span());
     if (passes.boot) fh.boot = scan_boot(fh.path, fm.span());
+    if (passes.keys) fh.keys = scan_keys(fh.path, fm.span(), &fh.rsa_keys);
 
     // Detect the distro/release from os-release (for CVE release precision).
     if (passes.cve && fm.size() < (1u << 16)) {
@@ -280,6 +284,9 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
         }
         for (auto& f : fh.licenses) rep.licenses.push_back({fh.path, std::move(f)});
         for (auto& f : fh.boot) rep.boot.push_back({fh.path, std::move(f)});
+        for (auto& f : fh.keys) rep.keys.push_back({fh.path, std::move(f)});
+        for (auto& rk : fh.rsa_keys)
+            rep.rsa_moduli.push_back({fh.path, rk.offset, std::move(rk.n), rk.e, rk.bits});
         if (rep.distro_id.empty() && !fh.distro_id.empty()) {
             rep.distro_id = std::move(fh.distro_id);
             rep.distro_version = std::move(fh.distro_version);

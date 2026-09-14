@@ -60,7 +60,7 @@ std::string sha256_hex(std::span<const uint8_t> data) {
     // Final block(s): remaining bytes + 0x80 + zero pad + 64-bit length.
     uint8_t tail[128];
     size_t rem = n - full * 64;
-    std::memcpy(tail, p + full * 64, rem);
+    if (rem) std::memcpy(tail, p + full * 64, rem);  // p may be null for an empty input
     tail[rem] = 0x80;
     size_t total = (rem + 1 <= 56) ? 64 : 128;
     std::memset(tail + rem + 1, 0, total - (rem + 1));

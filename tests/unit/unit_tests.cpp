@@ -13,9 +13,14 @@
 
 #include "ahocorasick.hpp"
 #include "binver.hpp"
+#include "bigint.hpp"
 #include "boot.hpp"
 #include "bootkeys.hpp"
 #include "certid.hpp"
+#include "keycorpus.hpp"
+#include "keys.hpp"
+#include "keyweak.hpp"
+#include "pubkey.hpp"
 #include "component.hpp"
 #include "fdt.hpp"
 #include "credstore.hpp"
@@ -1396,6 +1401,10 @@ static void test_sha256() {
           "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
     CHECK(sha256_hex(std::string(64, 'x')) ==
           "7ce100971f64e7001e8fe5a51973ecdfe1ced42befe7ee8d5fd6219506b5393c");
+    // A null-data empty span (vector::data() may be null) must hash as empty, not
+    // trip memcpy(nonnull) UB — the key-weakness pass fingerprints empty moduli.
+    CHECK(sha256_hex(std::span<const uint8_t>{}) ==
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 }
 
 // ---- DER private-key scanner --------------------------------------------
@@ -1535,6 +1544,179 @@ static void test_boot() {
     CHECK(!ft::parse_fdt(std::span<const uint8_t>(junk.data(), 3)).has_value());  // too short
 }
 
+static ft::BigUint big_from_hex(const char* h) {
+    std::vector<uint8_t> be;
+    std::string s = h;
+    if (s.size() % 2) s = "0" + s;
+    for (size_t i = 0; i < s.size(); i += 2) {
+        auto v = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return 0;
+        };
+        be.push_back(uint8_t(v(s[i]) * 16 + v(s[i + 1])));
+    }
+    return ft::BigUint::from_be(be);
+}
+
+static std::string big_to_hex(const ft::BigUint& b) {
+    auto be = b.to_be();
+    if (be.empty()) return "0";
+    static const char* hd = "0123456789abcdef";
+    std::string out;
+    for (uint8_t x : be) { out += hd[x >> 4]; out += hd[x & 0xf]; }
+    size_t z = 0;
+    while (z + 1 < out.size() && out[z] == '0') ++z;
+    return out.substr(z);
+}
+
+static void test_bigint() {
+    using ft::BigUint;
+    BigUint A = big_from_hex("deadbeef00000000cafebabe");
+    BigUint B = big_from_hex("123456789abcdef0");
+    // Known-answer vectors (oracle: Python).
+    CHECK(big_to_hex(A) == "deadbeef00000000cafebabe");   // from_be/to_be round-trip
+    CHECK(big_to_hex(A + B) == "deadbeef1234567965bb99ae");
+    CHECK(big_to_hex(A * B) == "fd5bdeedcba98677a69ab807f6e5d3ea447d620");
+    BigUint q, r;
+    A.divmod(B, q, r);
+    CHECK(big_to_hex(q) == "c3b6b4d00");
+    CHECK(big_to_hex(r) == "111111e37da08abe");
+    CHECK(big_to_hex(A % B) == "111111e37da08abe");
+    CHECK(big_to_hex(BigUint::gcd(A, B)) == "6");
+    CHECK(big_to_hex(A.isqrt()) == "eec23e24fa03");
+    // Perfect square detection.
+    BigUint root, sq = big_from_hex("123456789abcdef") * big_from_hex("123456789abcdef");
+    CHECK(sq.is_perfect_square(&root) && big_to_hex(root) == "123456789abcdef");
+    CHECK(!(sq + BigUint(1)).is_perfect_square());
+    // Edge cases: subtraction saturates, div by zero -> 0, shifts.
+    CHECK((B - A).is_zero());                       // saturating subtraction
+    CHECK((A - A).is_zero());
+    BigUint z, zr;
+    A.divmod(BigUint(), z, zr);
+    CHECK(z.is_zero() && zr.is_zero());             // divide by zero guarded
+    CHECK(big_to_hex(BigUint(1).shl_bits(64)) == "10000000000000000");
+    CHECK(big_to_hex(A.shl_bits(4).shr_bits(4)) == "deadbeef00000000cafebabe");
+    CHECK(BigUint(0).isqrt().is_zero() && BigUint(0).bit_length() == 0);
+
+    // Identity checks over pseudo-random values (no oracle needed): q*d+r==n,
+    // 0<=r<d, isqrt(x)^2 <= x < (isqrt+1)^2, gcd divides both, (a*b)/b==a.
+    uint64_t st = 0x9e3779b97f4a7c15ull;
+    auto nextrand = [&]() -> BigUint {
+        auto mix = [&]() { st ^= st << 13; st ^= st >> 7; st ^= st << 17; return st; };
+        size_t nbytes = 1 + (mix() % 40);
+        std::vector<uint8_t> b(nbytes);
+        for (auto& x : b) x = uint8_t(mix());
+        return BigUint::from_be(b);
+    };
+    for (int it = 0; it < 300; ++it) {
+        BigUint n = nextrand(), d = nextrand();
+        if (!d.is_zero()) {
+            BigUint qq, rr;
+            n.divmod(d, qq, rr);
+            CHECK(qq * d + rr == n && rr < d);
+        }
+        BigUint s = n.isqrt();
+        CHECK(s * s <= n && n < (s + BigUint(1)) * (s + BigUint(1)));
+        BigUint a = nextrand(), b = nextrand();
+        if (!b.is_zero()) {
+            BigUint prod = a * b, qab, rab;
+            prod.divmod(b, qab, rab);
+            CHECK(qab == a && rab.is_zero());  // (a*b)/b == a, exactly
+        }
+    }
+}
+
+static void test_keyweak() {
+    using namespace ft;
+
+    // ROCA fingerprint masks reproduce the published CRoCS `prints` table (the
+    // subgroup <65537> mod p, as a residue bitmask) for the small primes.
+    CHECK(roca_mask_for(3) == 6);      // {1,2}
+    CHECK(roca_mask_for(5) == 30);     // {1,2,3,4}
+    CHECK(roca_mask_for(7) == 126);    // {1..6}
+    CHECK(roca_mask_for(11) == 1026);  // {1,10}
+    CHECK(roca_mask_for(13) == 5658);
+    CHECK(roca_primes().size() == 38 && roca_primes().front() == 3 && roca_primes().back() == 167);
+
+    // mod_be: big-endian long division by a machine word.
+    {
+        std::vector<uint8_t> n = {0x01, 0x00};  // 256
+        CHECK(mod_be(n, 3) == 1 && mod_be(n, 7) == 4 && mod_be(n, 251) == 5);
+    }
+
+    // ROCA positive: 65537 itself is g^1 mod every prime, so it lands in every
+    // subgroup -> fingerprint-positive. And any 65537^k does too.
+    {
+        std::vector<uint8_t> g = {0x01, 0x00, 0x01};  // 65537
+        CHECK(is_roca(g));
+    }
+    // Negative: a multiple of 3 has residue 0 mod 3, which is outside {1,2} ->
+    // definitively not ROCA (one failing prime is a proof of non-vulnerability).
+    {
+        std::vector<uint8_t> n = {0x09};  // 9 == 0 mod 3
+        CHECK(!is_roca(n));
+        CHECK(!is_roca(std::span<const uint8_t>{}));  // empty -> false, no crash
+    }
+
+    // Structural weaknesses: size bands and exponent sanity.
+    auto has = [](const std::vector<KeyWeakness>& v, const char* id) {
+        for (auto& w : v) if (w.id == id) return true;
+        return false;
+    };
+    std::vector<uint8_t> odd = {0x03};   // odd modulus
+    std::vector<uint8_t> even = {0x04};  // even modulus
+    std::vector<uint8_t> e65537 = {0x01, 0x00, 0x01}, e1 = {0x01}, e4 = {0x04};
+    // A large exponent (513 bytes) is normal, NOT "broken" — the u64-overflow bug.
+    std::vector<uint8_t> ebig(513, 0x11);
+    CHECK(has(rsa_structural_weaknesses(512, e65537, odd), "rsa-tiny-modulus"));
+    CHECK(has(rsa_structural_weaknesses(1024, e65537, odd), "rsa-weak-modulus"));
+    CHECK(rsa_structural_weaknesses(2048, e65537, odd).empty());       // healthy key: nothing
+    CHECK(rsa_structural_weaknesses(2048, ebig, odd).empty());         // large e is fine
+    CHECK(has(rsa_structural_weaknesses(2048, e1, odd), "rsa-broken-exponent"));
+    CHECK(has(rsa_structural_weaknesses(2048, e4, odd), "rsa-even-exponent"));
+    CHECK(has(rsa_structural_weaknesses(2048, e65537, even), "rsa-even-modulus"));
+
+    // Fermat close-prime factorization: 10403 = 101 * 103 (adjacent-ish primes).
+    {
+        std::vector<uint8_t> N = {0x28, 0xa3}, p, q;  // 0x28a3 == 10403
+        CHECK(fermat_factor(N, p, q) && p.size() == 1 && p[0] == 101 && q.size() == 1 &&
+              q[0] == 103);
+        // A prime modulus is not factored within the window (bounded, returns false).
+        std::vector<uint8_t> prime = {0x00, 0x65}, pp, qq;  // 101
+        CHECK(!fermat_factor(prime, pp, qq));
+    }
+    // Batch-GCD shared prime: 10403 = 101*103 and 10807 = 101*107 share 101.
+    {
+        std::vector<uint8_t> A = {0x28, 0xa3}, B = {0x2a, 0x37};  // 10403, 10807
+        auto g = modulus_gcd(A, B);
+        CHECK(g.size() == 1 && g[0] == 101);
+        std::vector<uint8_t> C = {0x11};  // 17: coprime to 10807
+        auto g2 = modulus_gcd(B, C);
+        CHECK(g2.size() == 1 && g2[0] == 1);
+    }
+
+    // Leaked-key corpus: a compiled-in fingerprint hits; an unknown one does not.
+    CHECK(leaked_key_corpus_size() > 0);
+    CHECK(known_leaked_key("f69acc6ea852e10b5ea05435651243a9") != nullptr);  // F5 BIG-IP
+    CHECK(known_leaked_key("00000000000000000000000000000000") == nullptr);
+
+    // Extraction + end-to-end: a bare PKCS#1 RSA public key (n=65537, e=65537) is
+    // recovered as RSA and flagged ROCA by scan_keys. (n=65537 is the generator.)
+    {
+        // DER: SEQ { INTEGER 65537, INTEGER 65537 } -> "RSA PUBLIC KEY" PEM.
+        const char* pem =
+            "-----BEGIN RSA PUBLIC KEY-----\n"
+            "MAoCAwEAAQIDAQAB\n"
+            "-----END RSA PUBLIC KEY-----\n";
+        std::span<const uint8_t> sp(reinterpret_cast<const uint8_t*>(pem), std::strlen(pem));
+        auto pks = extract_public_keys(sp);
+        CHECK(pks.size() == 1 && pks[0].algo == "RSA" && pks[0].e == 65537);
+        CHECK(has_type(scan_keys("k.pub", sp), "roca-key"));
+    }
+}
+
 int main() {
     test_ahocorasick();
     test_entropy();
@@ -1575,6 +1757,8 @@ int main() {
     test_sbom_emit();
     test_sha256();
     test_boot();
+    test_bigint();
+    test_keyweak();
     std::printf("unit: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }
