@@ -37,7 +37,7 @@ void pad(std::string& o, const std::string& s, size_t w) {
 std::string clip_to(const std::string& s, size_t w) {
     if (s.size() <= w) return s;
     if (w <= 3) return s.substr(0, w);
-    return "..." + s.substr(s.size() - (w - 3));
+    return s.substr(0, w - 3) + "...";
 }
 
 // Width the value line (e.g. a kernel command line) is shown to before it is
@@ -74,7 +74,7 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
                 wtier = std::max(wtier, h.finding.confidence_tier.size());
                 wloc = std::max(wloc, h.path.size() + std::to_string(h.finding.offset).size() + 1);
             }
-            wtype = std::min<size_t>(wtype, 28);
+            wtype = std::min<size_t>(wtype, 34);
             wloc = std::min<size_t>(wloc, 56);
             o += "\n";
             for (const auto& h : rep.secrets) {
@@ -625,7 +625,7 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
             });
             size_t wtype = 4;
             for (const Hit* h : rows) wtype = std::max(wtype, h->finding.type.size());
-            wtype = std::min<size_t>(wtype, 26);
+            wtype = std::min<size_t>(wtype, 34);
             // Collapse identical (type, value) findings — the same lead repeated
             // across e.g. a multi-config FIT's sub-FDTs — into one row + a count.
             auto key = [](const Hit* h) { return h->finding.type + "\x1f" + h->finding.label; };
@@ -694,7 +694,7 @@ std::string emit_report_human(const Report& rep, const Passes& passes, const std
             });
             size_t wtype = 4;
             for (const Hit* h : rows) wtype = std::max(wtype, h->finding.type.size());
-            wtype = std::min<size_t>(wtype, 26);
+            wtype = std::min<size_t>(wtype, 34);
             // Collapse identical (type, value) findings (e.g. many legacy 1024-bit
             // roots in one CA bundle) into one row plus a count.
             auto key = [](const Hit* h) { return h->finding.type + "\x1f" + h->finding.label; };
