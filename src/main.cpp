@@ -406,9 +406,20 @@ int main(int argc, char** argv) {
         std::fwrite(j.data(), 1, j.size(), stdout);
         std::fputc('\n', stdout);
     } else {
-        char foot[128];
-        std::snprintf(foot, sizeof(foot), "Scanned %zu file%s (%zu bytes) in %.3f s",
-                      rep.file_count, rep.file_count == 1 ? "" : "s", rep.bytes_scanned, secs);
+        // Run-stats footer, matching moria's format: file count, byte total
+        // upscaled to KB/MB/GB/TB (integer bytes, one decimal thereafter), and
+        // elapsed seconds. Aligned label column mirrors moria exactly.
+        double b = static_cast<double>(rep.bytes_scanned);
+        const char* bu = "B";
+        for (const char* u : {"KB", "MB", "GB", "TB"}) {
+            if (b < 1024.0) break;
+            b /= 1024.0;
+            bu = u;
+        }
+        char foot[256];
+        std::snprintf(foot, sizeof(foot),
+                      "Files analyzed:  %zu\nBytes analyzed:  %.*f %s\nElapsed:         %.3f s",
+                      rep.file_count, (*bu == 'B' ? 0 : 1), b, bu, secs);
         bool color = isatty(fileno(stdout)) && !std::getenv("NO_COLOR");
         std::string h = emit_report_human(rep, impl, foot, color, license_paths, verbose);
         std::fwrite(h.data(), 1, h.size(), stdout);
