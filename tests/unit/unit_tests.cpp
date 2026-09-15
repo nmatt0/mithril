@@ -140,6 +140,35 @@ static void test_jsonparse() {
     CHECK(!ft::json_parse(deep(100000)).has_value()); // pathological -> nullopt, no crash
     // Deep nesting inside an object value is rejected too (the JWT/lockfile shape).
     CHECK(!ft::json_parse("{\"a\":" + deep(100000) + "}").has_value());
+
+    // Number grammar (RFC 8259). Regression for the parse_number tightening: the
+    // old parser grabbed a run of number-ish chars and passed it to std::stod, so
+    // it accepted "+1"/"01"/"1."/"1e" and silently mis-parsed "1.2.3" -> 1.2 while
+    // advancing the cursor past ".3". Malformed numbers must now be rejected, and
+    // every well-formed number still accepted.
+    auto as_num = [](const char* t) -> std::optional<double> {
+        auto p = ft::json_parse(t);
+        if (p && p->type == ft::JsonValue::Type::Number) return p->num;
+        return std::nullopt;
+    };
+    for (const char* t : {"0", "-0", "1", "-1", "123", "1.5", "-1.5", "0.5", "1e5",
+                          "1E5", "1e+5", "1e-5", "1.5e10", "-0.0", "12345.6789e-3"})
+        CHECK(as_num(t).has_value());
+    CHECK(as_num("1.5") == 1.5);
+    CHECK(as_num("-2") == -2.0);
+    CHECK(as_num("1e3") == 1000.0);
+    // Previously accepted (leading +, leading zero, bare/empty exponent or
+    // fraction, non-JSON forms) or silently mis-parsed (multi-token) -> reject.
+    for (const char* t : {"+1", "01", "-01", "00", "1.", "1e", "1e+", ".5", "1.2.3",
+                          "1..2", "1e5e6", "1.e5", "--1", "-", "0x10"})
+        CHECK(!ft::json_parse(t).has_value());
+    // A malformed number inside a structure fails the whole parse rather than
+    // truncating the value and continuing from the wrong offset.
+    CHECK(!ft::json_parse("[1.2.3]").has_value());
+    CHECK(!ft::json_parse(R"({"k":1e5e6})").has_value());
+    // Well-formed numbers as object/array values still parse.
+    CHECK(ft::json_parse(R"({"k":-1.5e3})").has_value());
+    CHECK(ft::json_parse("[0,-0,1e10,2.5]").has_value());
 }
 
 // ---------------------------------------------------------------- detectors
