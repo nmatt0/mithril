@@ -2,6 +2,7 @@
 #include "bigint.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace ft {
 
@@ -187,12 +188,27 @@ BigUint BigUint::operator%(const BigUint& o) const {
 }
 
 BigUint BigUint::gcd(BigUint a, BigUint b) {
-    while (!b.is_zero()) {
-        BigUint r = a % b;
-        a = b;
-        b = r;
+    // Binary (Stein's) GCD: only shifts and subtraction, no division. The
+    // Euclidean form (a % b each step) calls divmod, whose bit-by-bit long
+    // division makes each gcd cost O(bits) reductions * O(bits^2) per divmod.
+    // The batch-GCD shared-prime pass runs a gcd per pair of RSA moduli, so on
+    // a large cert bundle (a full CA store is hundreds of 2048-bit keys) that
+    // cubic-per-gcd cost turned the O(n^2) pass into a multi-minute hang.
+    if (a.is_zero()) return b;
+    if (b.is_zero()) return a;
+    size_t shift = 0;  // common power of two, restored at the end
+    while (!a.is_odd() && !b.is_odd()) {
+        a = a.shr_bits(1);
+        b = b.shr_bits(1);
+        ++shift;
     }
-    return a;
+    while (!a.is_odd()) a = a.shr_bits(1);
+    do {
+        while (!b.is_odd()) b = b.shr_bits(1);
+        if (cmp(a, b) > 0) std::swap(a, b);  // keep a <= b
+        b = b - a;                           // non-negative, and now even
+    } while (!b.is_zero());
+    return a.shl_bits(shift);
 }
 
 BigUint BigUint::isqrt() const {
