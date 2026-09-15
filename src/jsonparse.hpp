@@ -190,14 +190,27 @@ struct Parser {
 
     bool parse_number(JsonValue& out) {
         size_t start = i;
-        if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
-        bool any = false;
-        while (i < s.size() && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.' || s[i] == 'e' ||
-                                s[i] == 'E' || s[i] == '+' || s[i] == '-')) {
+        if (i < s.size() && s[i] == '-') ++i;
+        if (i >= s.size()) return false;
+        if (s[i] == '0') {
             ++i;
-            any = true;
+            if (i < s.size() && s[i] >= '0' && s[i] <= '9') return false;
+        } else if (s[i] >= '1' && s[i] <= '9') {
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+        } else {
+            return false;
         }
-        if (!any) return false;
+        if (i < s.size() && s[i] == '.') {
+            ++i;
+            if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+        }
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+            if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+        }
         std::string tok(s.substr(start, i - start));
         try {
             out.num = std::stod(tok);
