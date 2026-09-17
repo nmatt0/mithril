@@ -37,9 +37,13 @@ def build_tree(d):
         # canonical AWS example key: must be filtered as a false positive.
         f.write('const demo = "AKIAIOSFODNN7EXAMPLE";\n')
 
+    # A realistic on-disk private key: a real body (several base64 lines) and the
+    # matching END. The detector requires a body, so a bare header is not enough (#26).
     with open(os.path.join(d, "etc/id_rsa"), "w") as f:
         f.write("-----BEGIN OPENSSH PRIVATE KEY-----\n")
-        f.write("b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n")
+        body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz"
+        for _ in range(6):
+            f.write(body + "\n")
         f.write("-----END OPENSSH PRIVATE KEY-----\n")
 
     # A base64 config blob hiding an AWS key (decode-then-scan path).

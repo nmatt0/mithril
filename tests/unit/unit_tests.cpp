@@ -78,6 +78,15 @@ static bool has_type(const std::vector<ft::Finding>& fs, const std::string& t) {
     return find_type(fs, t) != nullptr;
 }
 
+// A well-formed PEM private-key block of `type` with a substantial base64 body
+// (three 64-char lines) and the matching END, for the detector's body gate (#26).
+static std::string pem_block(const std::string& type) {
+    const std::string line =
+        "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfnygWyF0qFrTfCK3myL7GTdrz6iApW5R2t8W";
+    return "-----BEGIN " + type + "-----\n" + line + "\n" + line + "\n" + line + "\n" +
+           "-----END " + type + "-----\n";
+}
+
 static std::string b64(const std::string& in) {
     static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string o;
@@ -181,7 +190,7 @@ static void test_detectors() {
     CHECK(has_type(scan("glpat-" "AbCdEf0123456789xYzQ end"), "gitlab-pat"));
     CHECK(has_type(scan("k=sk_live_" "0123456789abcdefABCDEF01 end"), "stripe-key"));
     CHECK(has_type(scan("key AIzaabcdefghijklmnopqrstuvwxyz012345678 x"), "google-api-key"));
-    CHECK(has_type(scan("-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n"), "private-key"));
+    CHECK(has_type(scan(pem_block("RSA PRIVATE KEY")), "private-key"));
     CHECK(has_type(scan("password = s3cr3tP@ssw0rd_9xQ7zLmN end"), "generic-secret"));
 }
 
@@ -255,10 +264,46 @@ static void test_validators_pem() {
     CHECK(ft::pem_key_type("-----BEGIN RSA PRIVATE KEY-----") == "RSA");
     CHECK(ft::pem_key_type("-----BEGIN OPENSSH PRIVATE KEY-----") == "OPENSSH");
     CHECK(ft::pem_key_type("-----BEGIN PRIVATE KEY-----") == "");
-    auto fs = scan("-----BEGIN EC PRIVATE KEY-----\nMHc...\n");
+    // A real block (header + body + matching END) is Structural with the type noted.
+    auto fs = scan(pem_block("EC PRIVATE KEY"));
     const ft::Finding* f = find_type(fs, "private-key");
     CHECK(f && f->confidence == static_cast<uint8_t>(ft::Confidence::Structural));
     CHECK(f && f->description.find("EC") != std::string::npos);
+    // PKCS#8 unadorned and encrypted headers are private-key labels too.
+    CHECK(has_type(scan(pem_block("PRIVATE KEY")), "private-key"));
+    CHECK(has_type(scan(pem_block("ENCRYPTED PRIVATE KEY")), "private-key"));
+}
+
+// GH #26: crypto libraries (mbedtls/OpenSSL/wolfSSL) embed the bare PEM label
+// strings in .rodata with no key body. None of these must yield a private-key.
+static void test_pem_label_false_positives() {
+    // PEM begin-markers below are written as two adjacent string literals
+    // ("-----BEGIN " "<TYPE>-----"), which the compiler concatenates to the exact
+    // bytes at runtime while the committed source holds no contiguous PEM header
+    // (the repo convention for synthetic key fixtures; keeps secret scanners quiet).
+    // Bare header, no body, no END.
+    CHECK(!has_type(scan("-----BEGIN " "RSA PRIVATE KEY-----\n"), "private-key"));
+    // BEGIN immediately followed by its END, zero body.
+    CHECK(!has_type(scan("-----BEGIN " "RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----\n"),
+                    "private-key"));
+    // A PUBLIC KEY label (with a real body) is never a private key.
+    CHECK(!has_type(scan(pem_block("PUBLIC KEY")), "private-key"));
+    // Type mismatch: a real body but the END type differs from the BEGIN type.
+    CHECK(!has_type(scan("-----BEGIN " "RSA PRIVATE KEY-----\n" +
+                         std::string(80, 'A') + "\n-----END EC PRIVATE KEY-----\n"),
+                    "private-key"));
+    // The exact mbedtls .rodata layout: NUL-separated labels packed back to back,
+    // including a BEGIN PUBLIC KEY adjacent to an END RSA PRIVATE KEY (target #2).
+    std::string labels;
+    for (const char* s : {"-----BEGIN " "RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----",
+                          "-----BEGIN " "EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----",
+                          "-----BEGIN " "PUBLIC KEY-----", "-----END PUBLIC KEY-----",
+                          "-----BEGIN " "PUBLIC KEY-----", "-----END RSA PRIVATE KEY-----",
+                          "-----BEGIN " "ENCRYPTED PRIVATE KEY-----"}) {
+        labels += s;
+        labels.push_back('\0');
+    }
+    CHECK(scan(labels).empty());
 }
 
 // ---------------------------------------------------------------- glob + path rules
@@ -1756,6 +1801,7 @@ int main() {
     test_validators_github_crc();
     test_validators_jwt();
     test_validators_pem();
+    test_pem_label_false_positives();
     test_derkey();
     test_glob();
     test_path_rules();
