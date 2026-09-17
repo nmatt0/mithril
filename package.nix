@@ -6,7 +6,8 @@
 }:
 stdenv.mkDerivation {
   pname = "mithril";
-  version = "0.2.1";
+  # Single source of truth: the top-level VERSION file (CMakeLists.txt reads it too).
+  version = lib.fileContents ./VERSION;
   src = ./.;
 
   nativeBuildInputs = [
