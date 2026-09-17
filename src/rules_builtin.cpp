@@ -74,29 +74,78 @@ std::optional<Match> match_jwt(const Reader& r, size_t off) {
     return m;
 }
 
-// PEM private-key body: anchor "-----BEGIN "; require "PRIVATE KEY-----" within
-// a short run of key-type words. Structural, not entropy-gated.
+// PEM base64 body alphabet (standard, plus '=' padding). Newlines / whitespace
+// are handled by the body scanner, not this predicate.
+inline bool c_base64_pem(uint8_t c) { return c_alnum(c) || c == '+' || c == '/' || c == '='; }
+
+// PEM private-key block: anchor "-----BEGIN "; parse the BEGIN header, then require
+// three things a real key has and a library's embedded PEM label string does not
+// (GH #26): (1) the header's own key type is a *private* key ("... PRIVATE KEY"),
+// so a "PUBLIC KEY" / "CERTIFICATE" label is never reported as a private key;
+// (2) a substantial base64 body follows the header; and (3) the block closes with
+// the matching "-----END <same type>-----". Crypto libraries (mbedtls, OpenSSL,
+// wolfSSL) embed the bare BEGIN/END label strings back to back in .rodata with no
+// body between them; those must not be reported. The returned match length is the
+// header line only (a marker, not secret bytes) -- the body scan is just a gate.
 std::optional<Match> match_pem_private(const Reader& r, size_t off) {
     constexpr size_t PREFIX = 11;  // "-----BEGIN "
-    const char* tail = "PRIVATE KEY-----";
-    const size_t tlen = 16;
-    for (size_t k = 0; k <= 40; ++k) {
-        auto b = r.bytes(off + PREFIX + k, tlen);
+    const uint8_t* DASH5 = reinterpret_cast<const uint8_t*>("-----");
+
+    // 1. Read the key-type token, from after "-----BEGIN " up to the closing
+    //    "-----" of the header. Type words are uppercase letters and single spaces
+    //    (e.g. "RSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "OPENSSH PRIVATE KEY").
+    constexpr size_t MAX_TYPE = 40;
+    size_t typelen = 0;
+    for (; typelen <= MAX_TYPE; ++typelen) {
+        auto b = r.bytes(off + PREFIX + typelen, 5);
         if (!b) return std::nullopt;
-        if (std::equal(b->begin(), b->end(), reinterpret_cast<const uint8_t*>(tail))) {
-            size_t hdr = PREFIX + k + tlen;
-            Match m;
-            m.len = hdr;
-            m.confidence = Confidence::Structural;
-            std::string header = token_str(r, off, hdr);
-            std::string kt = pem_key_type(header);
-            m.label = header;  // the header line is a marker, not secret bytes
-            m.evidence = "PEM private-key header";
-            m.description = "Private key" + (kt.empty() ? std::string() : " (" + kt + ")");
-            return m;
-        }
+        if (std::equal(b->begin(), b->end(), DASH5)) break;
+        uint8_t c = (*b)[0];
+        if (!((c >= 'A' && c <= 'Z') || c == ' ')) return std::nullopt;
     }
-    return std::nullopt;
+    if (typelen == 0 || typelen > MAX_TYPE) return std::nullopt;
+    std::string type = token_str(r, off + PREFIX, typelen);
+
+    // 2. The header must itself be a PRIVATE KEY label (rejects PUBLIC KEY,
+    //    CERTIFICATE, EC PARAMETERS, DH PARAMETERS, ...).
+    const std::string PK = "PRIVATE KEY";
+    if (type.size() < PK.size() || type.compare(type.size() - PK.size(), PK.size(), PK) != 0)
+        return std::nullopt;
+
+    const size_t hdr_end = off + PREFIX + typelen + 5;  // past "-----BEGIN <TYPE>-----"
+
+    // 3. Require a real base64 body, then the matching "-----END <TYPE>-----".
+    //    The first 5-dash run we meet must be that END and must be preceded by at
+    //    least MIN_BODY base64 chars; otherwise (BEGIN immediately followed by an
+    //    END/BEGIN, wrong END type, or no body) this is a bare label -> reject.
+    const std::string end_marker = "-----END " + type + "-----";
+    const auto* end_bytes = reinterpret_cast<const uint8_t*>(end_marker.data());
+    constexpr size_t WINDOW = 1u << 16;  // 64 KiB: ample for any PEM key body
+    constexpr size_t MIN_BODY = 64;      // smallest real key body is far larger than this
+    size_t body_b64 = 0;
+    bool closed = false;
+    for (size_t p = hdr_end; p < hdr_end + WINDOW; ++p) {
+        auto b = r.bytes(p, 5);
+        if (!b) return std::nullopt;
+        if (std::equal(b->begin(), b->end(), DASH5)) {
+            if (body_b64 >= MIN_BODY &&
+                r.matches_at(p, std::span<const uint8_t>(end_bytes, end_marker.size())))
+                closed = true;
+            break;  // first dash-run decides it: matching END with body, or reject
+        }
+        if (c_base64_pem((*b)[0])) ++body_b64;
+    }
+    if (!closed) return std::nullopt;
+
+    Match m;
+    m.len = PREFIX + typelen + 5;  // header line only; a marker, not secret bytes
+    m.confidence = Confidence::Structural;
+    std::string header = token_str(r, off, m.len);
+    std::string kt = pem_key_type(header);
+    m.label = header;
+    m.evidence = "PEM private-key block (base64 body + matching END)";
+    m.description = "Private key" + (kt.empty() ? std::string() : " (" + kt + ")");
+    return m;
 }
 
 // Generic assignment: KEY <sep> <high-entropy value>. Noisy -> hard entropy gate
