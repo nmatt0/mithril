@@ -1,6 +1,7 @@
 #include "binver.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <regex>
 #include <string_view>
 #include <utility>
@@ -91,6 +92,20 @@ const std::vector<std::regex>& compiled() {
 
 bool is_elf(std::span<const uint8_t> d) {
     return d.size() >= 4 && d[0] == 0x7f && d[1] == 'E' && d[2] == 'L' && d[3] == 'F';
+}
+
+// A vendor-SDK fork label for a version tail that continued past the parsed base
+// semver (e.g. "0.8.x_rtw_r24647.20171025", "2.10_ATBM_0.2"). The Realtek "_rtw_"
+// hostapd/wpa_supplicant fork is ubiquitous in IoT Wi-Fi SoCs; AltoBeam ("_ATBM")
+// is another. Anything else that continued with a non-numeric tag is a generic
+// vendor fork. Empty tail (a clean upstream version) returns "".
+std::string vendor_fork_label(const std::string& tail) {
+    std::string lt = tail;
+    for (char& c : lt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lt.find("rtw") != std::string::npos || lt.find("realtek") != std::string::npos)
+        return "Realtek SDK";
+    if (lt.find("atbm") != std::string::npos) return "AltoBeam SDK";
+    return "vendor fork";
 }
 
 }  // namespace
@@ -223,6 +238,28 @@ std::vector<Component> scan_binver(std::span<const uint8_t> data, const std::str
         c.origin_path = origin_path;
         c.confidence = 70;  // weaker than a package-DB entry
         c.evidence = "binary version banner: " + m[0].str();
+
+        // Vendor-fork detection: read the characters that continued past the base
+        // version. A clean continuation is ".<digits>" (already folded into the
+        // version); anything with a letter/'_'/'-'/'+' is a vendor tag. Keep the
+        // full on-disk string in the evidence and label the fork.
+        size_t tail_pos = off + static_cast<size_t>(m.position(0)) + static_cast<size_t>(m.length(0));
+        auto is_vertail = [](uint8_t ch) {
+            return std::isalnum(ch) || ch == '.' || ch == '_' || ch == '-' || ch == '+' || ch == '~';
+        };
+        size_t t = tail_pos;
+        while (t < end && is_vertail(data[t])) ++t;
+        if (t > tail_pos) {
+            std::string tail(reinterpret_cast<const char*>(data.data()) + tail_pos, t - tail_pos);
+            bool non_numeric = false;
+            for (char ch : tail)
+                if (ch != '.' && !(ch >= '0' && ch <= '9')) { non_numeric = true; break; }
+            if (non_numeric) {
+                c.fork = vendor_fork_label(tail);
+                c.evidence = "binary version banner: " + m[0].str() + tail;  // full string
+            }
+        }
+
         out.push_back(std::move(c));
         return true;
     });

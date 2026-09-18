@@ -233,6 +233,11 @@ double cvss_base_score(const std::string& vector) {
 // vector.
 bool cve_is_high_signal(const CveMatch& m) {
     if (m.kev) return true;                                       // exploited in the wild
+    // A vendor-fork component matched only by an unbounded-below range: we cannot
+    // confirm the fork's base carries the vulnerable code (e.g. a 0.8.x_rtw hostapd
+    // predates SAE), so drop it from the default view. Still listed under
+    // --component-cves-all with the "verify" basis. KEV above overrides this.
+    if (m.fork && m.unbounded_below) return false;
     double score = cvss_base_score(m.severity);
     if (score >= kHighSignalCvss) return true;                   // Critical, any shape
     if (score < kHighFloorCvss) return false;                    // hard floor: High/Critical only
@@ -388,6 +393,15 @@ std::vector<CveMatch> nvd_join(const NvdDb& db, const std::vector<Component>& co
             m.component_purl = c.purl;
             m.severity = v.cvss;
             m.basis = "nvd-cpe-range (" + p.vendor + ":" + p.product + ")";
+            // A range with no lower bound (no exact version, no start) matches every
+            // version below the ceiling -- including ones that predate the vulnerable
+            // code. On a vendor fork (stripped to a base semver) that is a likely
+            // false match, so flag both and annotate the basis for the down-rank.
+            m.unbounded_below =
+                v.version.empty() && v.start_incl.empty() && v.start_excl.empty();
+            m.fork = !c.fork.empty();
+            if (m.fork && m.unbounded_below)
+                m.basis += " [" + c.fork + "; range lower-bound unknown -- verify]";
             out.push_back(std::move(m));
         }
     }
