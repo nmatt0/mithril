@@ -572,6 +572,22 @@ static void test_binver() {
     CHECK(ver_of("wpa_supplicant", "wpa_supplicant v2.10_ATBM_0.2_") == "2.10");
     CHECK(ver_of("wpa_supplicant", "wpa_supplicant v0.8.x_rtw_r24") == "0.8");
     CHECK(ver_of("wpa_supplicant", "wpa_supplicant v2.10-devel") == "2.10");
+
+    // Vendor-fork detection: the stripped suffix sets Component::fork (labeled for
+    // the known IoT SDKs) and the evidence keeps the full on-disk string; a clean
+    // upstream version has no fork.
+    auto comp_of = [](const std::string& name, const std::string& body) -> ft::Component {
+        std::string e = std::string("\x7f\x45\x4c\x46", 4) + " " + body + " end";
+        for (const auto& c : binver(e))
+            if (c.name == name) return c;
+        return {};
+    };
+    auto rtw = comp_of("hostapd", "hostapd v0.8.x_rtw_r24647.20171025");
+    CHECK(rtw.version == "0.8" && rtw.fork == "Realtek SDK");
+    CHECK(rtw.evidence.find("0.8.x_rtw_r24647.20171025") != std::string::npos);  // full string
+    CHECK(comp_of("wpa_supplicant", "wpa_supplicant v2.10_ATBM_0.2_").fork == "AltoBeam SDK");
+    CHECK(comp_of("hostapd", "hostapd v2.10-devel").fork == "vendor fork");
+    CHECK(comp_of("hostapd", "hostapd v2.10").fork.empty());   // clean upstream -> no fork
 }
 
 // ---------------------------------------------------------------- u-boot banner
@@ -1255,6 +1271,25 @@ static void test_cvss_gate() {
     CHECK(ft::cve_is_high_signal(mk("AV:N/AC:L/Au:N/C:P/I:P/A:P", false, 0.20)));
     // v2 Medium (local, 1.2) -> hidden by the floor even with high EPSS.
     CHECK(!ft::cve_is_high_signal(mk("AV:L/AC:H/Au:N/C:P/I:N/A:N", false, 0.90)));
+
+    // --- vendor-fork + unbounded-below range: demoted (can't confirm the fork's
+    //     base carries the vulnerable code). A Critical shape that would normally
+    //     show is dropped when fork && unbounded_below; either flag alone keeps it.
+    auto crit = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";  // 9.8
+    ft::CveMatch f = mk(crit, false, 0.0);
+    f.fork = true;
+    f.unbounded_below = true;
+    CHECK(!ft::cve_is_high_signal(f));                    // fork + unbounded -> demoted
+    f.unbounded_below = false;
+    CHECK(ft::cve_is_high_signal(f));                     // fork but bounded range -> kept
+    ft::CveMatch u = mk(crit, false, 0.0);
+    u.unbounded_below = true;                             // unbounded but not a fork -> kept
+    CHECK(ft::cve_is_high_signal(u));
+    // KEV overrides the fork demotion (exploited in the wild).
+    ft::CveMatch k = mk(crit, true, 0.0);
+    k.fork = true;
+    k.unbounded_below = true;
+    CHECK(ft::cve_is_high_signal(k));
 }
 
 // ---------------------------------------------------------------- nvd/cpe join

@@ -70,6 +70,7 @@ void emit_component(std::string& o, const Component& c) {
     if (!c.arch.empty()) kv_str(o, "arch", c.arch, first);
     if (!c.license.empty()) kv_str(o, "license", c.license, first);
     kv_str(o, "source", c.source, first);
+    if (!c.fork.empty()) kv_str(o, "fork", c.fork, first);
     kv_str(o, "origin_path", c.origin_path, first);
     kv_num(o, "confidence", c.confidence, first);
     kv_str(o, "evidence", c.evidence, first);

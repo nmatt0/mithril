@@ -31,6 +31,13 @@ struct Component {
 
     uint8_t confidence = 0;  // 0-100
     std::string evidence;    // short reason, e.g. "dpkg status: install ok installed"
+
+    // A vendor SDK fork label (e.g. "Realtek SDK") when the version string carried
+    // a fork suffix that was stripped to a base semver (e.g. "0.8.x_rtw_r24647" ->
+    // "0.8"). Empty for a clean upstream version. The CVE join uses this to
+    // down-rank unbounded-range matches, since a fork's feature/backport state is
+    // unknown (a 0.8.x_rtw hostapd predates the SAE code some CVEs live in).
+    std::string fork;
 };
 
 }  // namespace ft

@@ -66,6 +66,8 @@ struct CveMatch {
     std::string summary;
     bool kev = false;            // on the CISA Known-Exploited catalog (annotation only)
     double epss = -1.0;          // EPSS exploit-probability (0..1), -1 if unknown
+    bool fork = false;           // component is a vendor SDK fork (Component::fork set)
+    bool unbounded_below = false;  // matched an affected range with no lower bound
 };
 
 // Canonicalize a vuln id to its CVE form when one is embedded ("DEBIAN-CVE-2021-
@@ -102,6 +104,9 @@ double cvss_base_score(const std::string& vector);
 // The default human CVE view is gated to foothold-worthy findings for a manual
 // pentester; the JSON view stays complete. A component CVE is "high-signal" if:
 //   - it is on the CISA KEV catalog (exploited in the wild) -- unconditional; OR
+//   - (it is NOT a vendor-fork component matched only by an unbounded-below range:
+//     such a match cannot be confirmed to apply -- a fork's base may predate the
+//     vulnerable code -- so it is demoted to the --component-cves-all list); AND
 //   - its CVSS base score is >= 9.0 (Critical) -- any shape; OR
 //   - it clears a hard High/Critical floor (base score >= 7.0) AND has EPSS
 //     traction (>= 0.10) AND is low-complexity (AC:L) AND EITHER
