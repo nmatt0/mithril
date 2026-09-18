@@ -71,12 +71,18 @@ std::vector<std::string> identify_license_text(std::span<const uint8_t> data) {
     };
 
     // GNU family — disambiguate Affero/Lesser/Library and version by the dated
-    // title line. LGPL 2.0 (1991) is titled "Library General Public License";
+    // title line. LGPL 2.0 (1991) is titled "GNU LIBRARY GENERAL PUBLIC LICENSE";
     // the 2.1 (1999) rename to "Lesser" is why v2 needs its own marker (without
     // it an LGPL-2.0 COPYING is mis-identified as GPL-2.0).
+    //
+    // `library` matches only the all-caps *title*, never the mixed-case phrase
+    // "GNU Library General Public License": the latter appears in the GPLv2
+    // *preamble* ("...covered by the GNU Library General Public License
+    // instead.)"), so matching it flipped a genuine GPL-2.0 file to LGPL-2.0 and
+    // dropped GPL-2.0 entirely.
     bool affero = has("GNU AFFERO GENERAL PUBLIC LICENSE") || has("GNU Affero");
     bool lesser = has("GNU LESSER GENERAL PUBLIC LICENSE") || has("Lesser General Public");
-    bool library = has("GNU LIBRARY GENERAL PUBLIC LICENSE") || has("Library General Public License");
+    bool library = has("GNU LIBRARY GENERAL PUBLIC LICENSE");
     if (has("Version 3, 29 June 2007")) {
         if (affero) add("AGPL-3.0");
         else if (lesser) add("LGPL-3.0");

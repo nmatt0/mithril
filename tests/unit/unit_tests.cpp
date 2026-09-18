@@ -1399,6 +1399,20 @@ static void test_license() {
     // and plain GPL-2.0 is still GPL-2.0 (no false LGPL).
     CHECK(lic_text("GNU GENERAL PUBLIC LICENSE\n Version 2, June 1991\n") ==
           std::vector<std::string>{"GPL-2.0"});
+    // Regression: the real GPLv2 *preamble* names the LGPL ("...covered by the
+    // GNU Library General Public License instead."). That mixed-case mention must
+    // NOT flip a genuine GPL-2.0 file to LGPL-2.0, nor drop GPL-2.0. Only the
+    // all-caps LGPL *title* means LGPL-2.0.
+    auto gpl2_preamble = lic_text(
+        "GNU GENERAL PUBLIC LICENSE\n Version 2, June 1991\n\n"
+        "  (Some other Free Software Foundation software is covered by the GNU\n"
+        "Library General Public License instead.)  You can apply it too.\n");
+    CHECK(gpl2_preamble.size() == 1 && gpl2_preamble[0] == "GPL-2.0");
+    // and a real LGPL-2.0 (caps title) is still LGPL-2.0, even with a preamble.
+    auto lgpl2_full = lic_text(
+        "GNU LIBRARY GENERAL PUBLIC LICENSE\n Version 2, June 1991\n\n"
+        "  This library is free software; you can redistribute it ...\n");
+    CHECK(lgpl2_full.size() == 1 && lgpl2_full[0] == "LGPL-2.0");
 
     // New markers.
     CHECK(lic_text("Boost Software License - Version 1.0") == std::vector<std::string>{"BSL-1.0"});
