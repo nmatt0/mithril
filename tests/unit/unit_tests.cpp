@@ -201,6 +201,32 @@ static void test_false_positives() {
     CHECK(!has_type(scan("secret = abc"), "generic-secret"));
 }
 
+// generic-secret value-shape filter: structured text (format strings, query
+// shapes, code/identifier/localization words) must not be reported, while a real
+// digit-bearing opaque token still is. Shapes drawn from real minified-JS web
+// bundles and localization files, plus a JWT-shaped access token to keep.
+static void test_generic_secret_shape() {
+    // (1) format strings.
+    CHECK(!has_type(scan("password=%s&mac=%s&firmware=%s&serial=%s"), "generic-secret"));
+    CHECK(!has_type(scan("secret = value_is_%s_formatted_padding"), "generic-secret"));
+    // (2) assignment / query shapes.
+    CHECK(!has_type(scan("password=user=admin&role=root&scope=all"), "generic-secret"));
+    // (3) no-digit code / identifier / localization words.
+    CHECK(!has_type(scan("password = document.getElementsByName sysDNSPassword"), "generic-secret"));
+    CHECK(!has_type(scan("password: cf.sysDNSPassword_Netgear.value"), "generic-secret"));
+    CHECK(!has_type(scan("passwd = Passwortwiederherstellungxx"), "generic-secret"));
+    CHECK(!has_type(scan("secretKey = createInputPseudoElement"), "generic-secret"));
+    // real minified-JS / localization shapes with stray leading/trailing punct and
+    // consecutive separators (drawn from the corpus residuals).
+    CHECK(!has_type(scan("password:this._szSecondAuthValue=\"x"), "generic-secret"));
+    CHECK(!has_type(scan("password = Wachtwoord-formatteerfoutmelding."), "generic-secret"));
+    CHECK(!has_type(scan("password = +this.oSecondAuthentication.value"), "generic-secret"));
+    // Real digit-bearing tokens still match: a JWT-shaped access token (the one
+    // corpus true positive) and a base64-ish credential.
+    CHECK(has_type(scan("access_token = eyJhbGciOiJIUzI1NiIsImtpZCI6Im45aXV9x"), "generic-secret"));
+    CHECK(has_type(scan("password = S3cr3t_Pa55w0rd_9xQ7zLmNq end"), "generic-secret"));
+}
+
 static void test_encoded() {
     std::string enc = b64("cred AKIAJ2K3L4M5N6P7Q8R9 tail");
     auto fs = scan("data: " + enc + " done");
@@ -1811,6 +1837,7 @@ int main() {
     test_jsonparse();
     test_detectors();
     test_false_positives();
+    test_generic_secret_shape();
     test_encoded();
     test_validators_github_crc();
     test_validators_jwt();

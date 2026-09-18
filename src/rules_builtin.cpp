@@ -1,6 +1,7 @@
 #include "rules_builtin.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <ctime>
 
 #include "validators.hpp"
@@ -148,8 +149,64 @@ std::optional<Match> match_pem_private(const Reader& r, size_t off) {
     return m;
 }
 
+// Generic-secret precision: reject "values" that are structured text, not an
+// opaque credential token. Real hardcoded secrets carry a digit / base64
+// density; the corpus false positives are all one of three shapes:
+//   (1) format strings  -- "...%s&mac=%s..."          (printf/URL templates)
+//   (2) assignment/query -- "a=b&c=d"                 (query strings, not a field)
+//   (3) no-digit word/identifier -- "document.getElementsByName",
+//       "createInputPseudo", "Passwortwiederherstellung" (code / minified JS /
+//       localization strings)
+// These three drop the code/web-UI/i18n FPs while keeping digit-bearing tokens
+// (e.g. a JWT/base64 access token). Precision-first at the pattern tier; a
+// purely-alphabetic hardcoded password is the one accepted false-negative.
+bool generic_value_is_noise(const std::string& v) {
+    // (1) printf/format specifier: '%' + optional flags/width/precision + conv.
+    for (size_t i = 0; i + 1 < v.size(); ++i) {
+        if (v[i] != '%') continue;
+        size_t j = i + 1;
+        while (j < v.size() && (std::strchr("-+ 0#.", v[j]) != nullptr || (v[j] >= '0' && v[j] <= '9')))
+            ++j;
+        if (j < v.size() && std::strchr("sdiouxXeEfgGcpaAn@", v[j]) != nullptr) return true;
+    }
+    // (2) assignment / query shape: an interior '=' or any '&' (a trailing run of
+    //     '=' is base64 padding and is ignored).
+    size_t end = v.size();
+    while (end > 0 && v[end - 1] == '=') --end;
+    for (size_t i = 0; i < end; ++i)
+        if (v[i] == '=' || v[i] == '&') return true;
+    // (3) no-digit word / identifier chain: letters joined by single '.', '_' or
+    //     '-' separators, no digit -> code / prose, not a random token. Trim
+    //     leading/trailing non-alphanumerics first (stray quotes, operators, and
+    //     sentence punctuation carried in from source/markup, e.g. "+this.x.y" or
+    //     "Wachtwoord-formatteerfout." or "this._szAuth=").
+    auto is_alnum = [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    };
+    size_t a = 0, b = v.size();
+    while (a < b && !is_alnum(v[a])) ++a;
+    while (b > a && !is_alnum(v[b - 1])) --b;
+    if (b > a) {
+        bool has_digit = false;
+        for (size_t i = a; i < b; ++i)
+            if (v[i] >= '0' && v[i] <= '9') { has_digit = true; break; }
+        if (!has_digit) {
+            // The trimmed core (alnum at both ends, no digit) is word/identifier
+            // shaped when every char is a letter or a '.'/'_'/'-' separator --
+            // dotted member access, snake/camel identifiers, hyphenated words.
+            auto is_alpha = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+            auto is_sep = [](char c) { return c == '.' || c == '_' || c == '-'; };
+            bool shape = true;
+            for (size_t i = a; shape && i < b; ++i)
+                if (!is_alpha(v[i]) && !is_sep(v[i])) shape = false;
+            if (shape) return true;
+        }
+    }
+    return false;
+}
+
 // Generic assignment: KEY <sep> <high-entropy value>. Noisy -> hard entropy gate
-// applied by the engine (min_entropy on the rule).
+// applied by the engine (min_entropy on the rule), plus a value-shape filter.
 std::optional<Match> match_generic(const Reader& r, size_t off) {
     size_t p = off;
     p += run(r, p, 32, c_alnum_us);  // the keyword
@@ -171,6 +228,7 @@ std::optional<Match> match_generic(const Reader& r, size_t off) {
     }
     size_t v = run(r, p, 200, c_secretval);
     if (v < 16) return std::nullopt;
+    if (generic_value_is_noise(token_str(r, p, v))) return std::nullopt;
     return Match{(p + v) - off, Confidence::Pattern, "", "", "", ""};
 }
 
