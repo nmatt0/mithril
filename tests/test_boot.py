@@ -457,6 +457,24 @@ def main():
     check("uefi-platform-key" in types(ph) and "uefi-secureboot-on" in types(ph),
           "nvar: FV at a nonzero offset (full-flash dump) still analyzed")
 
+    # A variable store extracted on its own (a chipsec/UEFITool artifact) has no FV
+    # wrapper, so no "_FVH" signature. It must still be analyzed -- the raw AMI store
+    # begins with an "NVAR" entry. A large defaults-container entry ("StdDefaults")
+    # sits up front, as on a real BIOS; the top-level PK/dbx after it are still
+    # recovered. Regression: without the store-start trigger this was silently
+    # skipped, so an extracted NVAR store reported nothing.
+    raw = b"".join(_nvar_entry(n, d) for (n, d) in
+                   [("StdDefaults", b"\x00" * 200), ("PK", b"PKCERT" * 40),
+                    ("KEK", b"KEK" * 30), ("db", b"DB" * 300), ("dbx", sha256_siglist(5)),
+                    ("SecureBoot", b"\x01")])
+    check(raw[:4] == b"NVAR", "nvar: standalone store begins with an NVAR entry (no FV)")
+    rh = run("varstore.bin", raw)
+    check("uefi-platform-key" in types(rh) and "uefi-secureboot-on" in types(rh),
+          "nvar: standalone extracted store (no FV wrapper) is analyzed")
+    rdbx = [x for x in rh if x["type"] == "uefi-dbx"]
+    check(bool(rdbx) and "5 revocation" in rdbx[0]["label"],
+          "nvar: standalone store dbx enumerated past a leading container entry")
+
     # PKFAIL through the NVAR store: PK is the AMI "DO NOT TRUST" test key.
     nvpk = nvar_store([("PK", efi_sig_list(ami_cert)), ("SecureBoot", b"\x01")])
     check("uefi-test-platform-key" in types(run("bios.bin", nvpk)),

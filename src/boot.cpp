@@ -775,7 +775,16 @@ std::vector<Finding> scan_boot(const std::string& path, std::span<const uint8_t>
     {
         static const uint8_t kFvh[4] = {'_', 'F', 'V', 'H'};
         std::span<const uint8_t> head = data.subspan(0, std::min<size_t>(data.size(), 64u << 20));
-        if (find_bytes(head, kFvh, 4, 0) != std::string::npos) {
+        // A full BIOS image carries the FV header signature "_FVH" somewhere. A
+        // variable store extracted on its own (the usual chipsec/UEFITool artifact)
+        // has no FV wrapper: an EDK2 authenticated/variable store begins with its
+        // store GUID, an AMI store begins with an "NVAR" entry. Trigger on either
+        // so an extracted store is analyzed too; analyze_uefi self-filters (emits
+        // nothing without a real recovered variable), so the loose trigger is safe.
+        bool is_varstore = guid_at(data, 0, kAuthVarStore) || guid_at(data, 0, kVarStore) ||
+                           (data.size() >= 4 && data[0] == 'N' && data[1] == 'V' &&
+                            data[2] == 'A' && data[3] == 'R');
+        if (is_varstore || find_bytes(head, kFvh, 4, 0) != std::string::npos) {
             analyze_uefi(data, out);
             if (!out.empty()) return out;
         }
