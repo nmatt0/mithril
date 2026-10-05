@@ -1,3 +1,14 @@
+mithril (0.3.0-1) unstable; urgency=medium
+
+  * New --boot Boot Security pass: U-Boot env, device tree, and FIT posture.
+  * New --keys Public-Key Weakness pass (batch-GCD shared-prime detection).
+  * UEFI variable stores and Secure Boot certificate/dbx enumeration, including
+    standalone variable stores that carry no firmware-volume header.
+  * Precision fixes: PEM private-key bodies, GPL-vs-LGPL identification,
+    generic-secret false positives, vendor-fork CVE ranges, JSON number parsing.
+
+ -- Matt Brown <matt@brownfinesecurity.com>  Mon, 05 Oct 2026 13:01:08 -0400
+
 mithril (0.2.1-1) unstable; urgency=medium
 
   * Debian packaging for mithril; a .deb is attached to each GitHub release.
