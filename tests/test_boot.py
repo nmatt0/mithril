@@ -21,7 +21,7 @@ import tempfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MITHRIL = os.path.join(HERE, "..", "build", "mithril")
+MITHRIL = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "build", "mithril")
 
 # --- dtc-built device-tree / FIT fixtures (base64 of the compiled blobs) ------
 # board.dts: model="Acme Router X1000", compatible="acme,x1000","acme,ipq8065",

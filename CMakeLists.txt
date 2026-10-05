@@ -125,21 +125,19 @@ add_test(NAME mithril_unit COMMAND mithril_unit)
 # mithril_unit above is run.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-  # Corpus/generator consistency checks and test_boot: no binary argument.
+  # Corpus/generator consistency checks: no binary argument.
   add_test(NAME gen_bootkeys
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_bootkeys.py --check
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME gen_keycorpus
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_keycorpus.py --check
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-  add_test(NAME test_boot
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_boot.py
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   # These take the freshly built binary as argv[1].
   set(_mithril_py_tests
     test_secrets
     test_der_keys
     test_keys
+    test_boot
     test_sbom
     test_cve
     test_licenses
