@@ -96,7 +96,6 @@ const std::vector<KCve>& table() {
         {"CVE-2022-42720", "5.1", "6.1", "RCE", {"CONFIG_MAC80211"}, {}, "mac80211 BSS refcount UAF; remote (companion to 42719)."},
         // Bluetooth (CONFIG_BT): remote over BR/EDR (BleedingTooth); proximity RCE.
         {"CVE-2020-12351", "4.8", "5.10", "RCE", {"CONFIG_BT"}, {}, "BleedingTooth: L2CAP A2MP type confusion; remote BT RCE."},
-        {"CVE-2024-24246", "", "6.7", "LPE", {"CONFIG_QAT"}, {}, "QAT driver UAF (hardware-specific)."},
 
         // --- misc high-signal ---
         {"CVE-2021-27365", "", "5.11.4", "LPE", {"CONFIG_SCSI_ISCSI_ATTRS"}, {}, "iSCSI netlink heap OOB."},

@@ -933,6 +933,14 @@ static void test_kernelcve() {
           dp->reason.find("config unknown") != std::string::npos);
     CHECK(find_kcve(r, "CVE-2016-5195") == nullptr);  // Dirty COW fixed 4.8.3 -> out of range
 
+    // CVE-2024-24246 is a qpdf heap-buffer-overflow, not a Linux/QAT CVE.
+    // Keep it out of the kernel checklist regardless of version or QAT config.
+    std::set<std::string> qat = {"CONFIG_QAT"};
+    for (const auto* version : {"3.4.0", "6.3", "6.6.86"}) {
+        CHECK(find_kcve(ft::kernel_cve_scan(version, NOCFG), "CVE-2024-24246") == nullptr);
+        CHECK(find_kcve(ft::kernel_cve_scan(version, &qat), "CVE-2024-24246") == nullptr);
+    }
+
     // Config gating: NF_TABLES present -> nftables applies; io_uring absent -> ruled out.
     std::set<std::string> cfg = {"CONFIG_NF_TABLES"};
     auto r2 = ft::kernel_cve_scan("6.3", &cfg);
