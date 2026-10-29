@@ -404,7 +404,7 @@ static void test_sbom_apk() {
                    "P:musl\nV:1.2.4-r2\nA:x86_64\nL:MIT\n\nP:busybox\nV:1.36.1-r5\nA:x86_64\n");
     CHECK(cs.size() == 2);
     const ft::Component* m = find_comp(cs, "musl");
-    CHECK(m && m->license == "MIT" && m->purl == "pkg:apk/alpine/musl@1.2.4-r2?arch=x86_64");
+    CHECK(m && m->license == "MIT" && m->purl == "pkg:apk/musl@1.2.4-r2?arch=x86_64");
 }
 
 // ---------------------------------------------------------------- credential stores
@@ -1158,6 +1158,7 @@ static void test_cve() {
         c.name = name;
         c.version = ver;
         c.source = src;
+        if (src == "apk") c.distro_id = "alpine";
         c.purl = "pkg:x/" + name + "@" + ver;
         return c;
     };
@@ -1175,6 +1176,13 @@ static void test_cve() {
         if (m.cve_id == "CVE-2022-0778" && m.component == "openssl@1.1.1m-r0") ossl = true;
     }
     CHECK(bb && ossl);
+
+    // The caller's global distro cannot turn a foreign or unknown APK into Alpine.
+    auto foreign = mk("openssl", "1.1.1m-r0", "apk");
+    foreign.distro_id = "openwrt";
+    CHECK(ft::cve_join(db, {foreign}, "alpine").empty());
+    foreign.distro_id.clear();
+    CHECK(ft::cve_join(db, {foreign}, "alpine").empty());
 
     // A patched component yields no CVE.
     auto none = ft::cve_join(db, {mk("busybox", "1:1.30.1-6", "dpkg")});

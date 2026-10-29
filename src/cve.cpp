@@ -57,7 +57,7 @@ std::string source_to_eco(const std::string& source, const std::string& distro_i
     // dpkg is Debian by default, Ubuntu when the image's os-release id says so
     // (Ubuntu forks Debian and patches on its own schedule / version scheme).
     if (source == "dpkg") return lower(distro_id) == "ubuntu" ? "Ubuntu" : "Debian";
-    if (source == "apk") return "Alpine";
+    if (source == "apk") return lower(distro_id) == "alpine" ? "Alpine" : "";
     if (source == "rpm") return rpm_eco(distro_id);
     // Language ecosystems (from langmanifest).
     if (source == "npm") return "npm";
@@ -91,16 +91,19 @@ std::vector<CveMatch> cve_join(const Index& db, const std::vector<Component>& co
                                const std::string& distro_id, const std::string& distro_release) {
     std::vector<CveMatch> out;
     for (const auto& c : components) {
-        std::string eco = source_to_eco(c.source, distro_id);
+        std::string eco = source_to_eco(c.source, c.source == "apk" ? c.distro_id : distro_id);
         if (eco.empty() || c.name.empty() || c.version.empty()) continue;
+        // APK matching remains release-agnostic. A different root's global
+        // Debian/Ubuntu release must not filter Alpine advisories.
+        const std::string release = c.source == "apk" ? "" : distro_release;
         // OsvDb::lookup returns a const ref; OsvIndex::lookup a temporary vector.
         // Binding to a const ref keeps the temporary alive for the loop.
         const auto& vulns = db.lookup(eco, c.name);
         for (const auto& v : vulns) {
             // Release precision: if both the image and the vuln name a release,
             // require them to agree; otherwise match release-agnostically.
-            bool precise = !distro_release.empty() && !v.release.empty();
-            if (precise && v.release != distro_release) continue;
+            bool precise = !release.empty() && !v.release.empty();
+            if (precise && v.release != release) continue;
             if (!osv_is_affected(c.version, v.events)) continue;
             CveMatch m;
             m.cve_id = v.id;

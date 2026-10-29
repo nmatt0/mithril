@@ -142,6 +142,7 @@ if(Python3_Interpreter_FOUND)
     test_boot
     test_sbom
     test_cve
+    test_apk_distro
     test_licenses
     test_kconfig
     test_kconfig_recovery

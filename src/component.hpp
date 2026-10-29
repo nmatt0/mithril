@@ -38,6 +38,10 @@ struct Component {
     // down-rank unbounded-range matches, since a fork's feature/backport state is
     // unknown (a 0.8.x_rtw hostapd predates the SAE code some CVEs live in).
     std::string fork;
+
+    // APK is shared by multiple distributions. Set only from this package
+    // database's own filesystem root; an empty ID must not imply Alpine.
+    std::string distro_id;
 };
 
 }  // namespace ft

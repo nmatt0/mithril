@@ -49,6 +49,9 @@ L:MIT
 
 
 def build_tree(d):
+    os.makedirs(os.path.join(d, "etc"))
+    with open(os.path.join(d, "etc/os-release"), "w") as f:
+        f.write("ID=alpine\nVERSION_ID=3.20\n")
     os.makedirs(os.path.join(d, "var/lib/dpkg"))
     os.makedirs(os.path.join(d, "lib/apk/db"))
     with open(os.path.join(d, "var/lib/dpkg/status"), "w") as f:

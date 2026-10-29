@@ -8,6 +8,7 @@
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "binver.hpp"
@@ -51,6 +52,25 @@ struct FileHits {
     KernelConfigView kcv;  // per-file config knowledge (merged into the report)
     std::string kconfig_text, kconfig_source;  // verbatim recovered .config, if any
 };
+
+// Match a root-relative canonical path, without borrowing an ancestor's or
+// sibling image's identity when a scan contains multiple extracted roots.
+std::optional<std::string> owning_root(std::string_view path, std::string_view suffix) {
+    if (path == suffix) return std::string{};
+    if (path.size() <= suffix.size() || !path.ends_with(suffix)) return std::nullopt;
+    const size_t split = path.size() - suffix.size() - 1;
+    if (path[split] != '/') return std::nullopt;
+    return std::string(path.substr(0, split));
+}
+
+std::string apk_distro_id(const std::string& id) {
+    // os-release ID syntax also keeps the package URL namespace unambiguous.
+    const bool valid = !id.empty() && std::all_of(id.begin(), id.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+               c == '_' || c == '.' || c == '-';
+    });
+    return valid ? id : std::string{};
+}
 
 // Parse an os-release file for ID and VERSION_ID (quotes stripped).
 void parse_os_release(std::span<const uint8_t> data, std::string& id, std::string& version) {
@@ -183,8 +203,8 @@ FileHits scan_one(const fs::path& path, const fs::path& root, const Passes& pass
     if (passes.boot) fh.boot = scan_boot(fh.path, fm.span());
     if (passes.keys) fh.keys = scan_keys(fh.path, fm.span(), &fh.rsa_keys);
 
-    // Detect the distro/release from os-release (for CVE release precision).
-    if (passes.cve && fm.size() < (1u << 16)) {
+    // Distro identity is also needed for APK package URLs in SBOM-only scans.
+    if ((passes.sbom || passes.cve) && fm.size() < (1u << 16)) {
         std::string_view p = fh.path;
         auto ends = [&](std::string_view s) {
             return p.size() >= s.size() && p.compare(p.size() - s.size(), s.size(), s) == 0;
@@ -219,6 +239,7 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
     std::error_code ec;
     std::vector<fs::path> paths;
     std::vector<Component> sym_components;  // libc versions read off symlink targets
+    std::unordered_set<std::string> unknown_apk_roots;
     fs::path root_path(root);
     fs::path rel_root;
 
@@ -230,6 +251,21 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
              !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (it->is_symlink()) {
                 it.disable_recursion_pending();
+                if (passes.sbom || passes.cve) {
+                    const auto rel = it->path().lexically_relative(rel_root).generic_string();
+                    if (auto r = owning_root(rel, "etc")) unknown_apk_roots.insert(*r);
+                    if (auto r = owning_root(rel, "etc/os-release")) {
+                        std::error_code sec;
+                        const auto target = fs::read_symlink(it->path(), sec);
+                        const auto resolved = target.is_absolute()
+                            ? fs::path(*r) / target.relative_path()
+                            : fs::path(rel).parent_path() / target;
+                        // Recognize the standard alias without following links.
+                        // Every other alias is unknown, never an Alpine fallback.
+                        if (sec || resolved.lexically_normal() != fs::path(*r) / "usr/lib/os-release")
+                            unknown_apk_roots.insert(*r);
+                    }
+                }
                 // A libc symlink (libc.so.0 -> libuClibc-0.9.30.so) carries the
                 // version in its target name even when the target file was not
                 // extracted. Read the link (no follow) and version off the target.
@@ -291,6 +327,16 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
     for (unsigned t = 0; t < nthreads; ++t) pool.emplace_back(worker);
     for (auto& th : pool) th.join();
 
+    std::unordered_map<std::string, std::string> apk_distros;
+    for (const auto& fh : results)
+        if (auto r = owning_root(fh.path, "usr/lib/os-release"))
+            apk_distros[*r] = apk_distro_id(fh.distro_id);
+    // /etc takes precedence, including an unreadable or invalid identity.
+    for (const auto& fh : results)
+        if (auto r = owning_root(fh.path, "etc/os-release"))
+            apk_distros[*r] = apk_distro_id(fh.distro_id);
+    for (const auto& r : unknown_apk_roots) apk_distros[r].clear();
+
     std::unordered_set<std::string> seen_components;
     for (auto& fh : results) {
         rep.bytes_scanned += fh.size;
@@ -306,6 +352,14 @@ Report scan_path(const std::string& root, const Passes& passes, unsigned nthread
         // (path-sorted, deterministic). purl keeps distinct provenance apart
         // (pkg:deb/openssl vs pkg:generic/openssl are different components).
         for (auto& c : fh.components) {
+            if (c.source == "apk") {
+                if (auto r = owning_root(fh.path, "lib/apk/db/installed")) {
+                    auto distro = apk_distros.find(*r);
+                    if (distro != apk_distros.end()) c.distro_id = distro->second;
+                }
+                if (!c.distro_id.empty() && c.purl.starts_with("pkg:apk/"))
+                    c.purl.insert(8, c.distro_id + "/");
+            }
             if (c.name == "linux_kernel" && rep.kernel_version.empty()) rep.kernel_version = c.version;
             std::string k = c.name + "\x1f" + c.version + "\x1f" + c.purl;
             if (seen_components.insert(std::move(k)).second) rep.components.push_back(std::move(c));

@@ -42,17 +42,16 @@ void for_each_line(std::string_view text, F cb) {
 
 std::string make_purl(const std::string& source, const std::string& name, const std::string& version,
                       const std::string& arch) {
-    std::string ptype = "generic", ns;
+    std::string ptype = "generic";
     if (source == "dpkg") {
         ptype = "deb";
     } else if (source == "opkg") {
         ptype = "opkg";
     } else if (source == "apk") {
         ptype = "apk";
-        ns = "alpine";
     }
     std::string purl = "pkg:" + ptype + "/";
-    if (!ns.empty()) purl += ns + "/";
+    // The walker adds an APK namespace only after resolving the owning root.
     purl += name;
     if (!version.empty()) purl += "@" + version;
     if (!arch.empty()) purl += "?arch=" + arch;

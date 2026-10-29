@@ -31,6 +31,7 @@ python3 tests/test_sbom.py "./$BUILD/mithril"
 
 echo "== integration: cve (fixture db) =="
 python3 tests/test_cve.py "./$BUILD/mithril"
+python3 tests/test_apk_distro.py "./$BUILD/mithril"
 
 echo "== integration: licenses =="
 python3 tests/test_licenses.py "./$BUILD/mithril"
