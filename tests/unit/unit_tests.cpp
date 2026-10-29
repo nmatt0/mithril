@@ -337,6 +337,13 @@ static void test_pem_label_false_positives() {
 static void test_glob() {
     CHECK(ft::glob_match("**/shadow", "etc/shadow"));
     CHECK(ft::glob_match("**/shadow", "shadow"));
+    CHECK(ft::glob_match("**/shadow", "var/config/shadow"));
+    // "**/tail" anchors the tail to a segment boundary: a file whose name merely
+    // ends in the tail must not match (an ELF "bin/login.shadow" is not shadow).
+    CHECK(!ft::glob_match("**/shadow", "bin/login.shadow"));
+    CHECK(!ft::glob_match("**/shadow", "login.shadow"));
+    CHECK(!ft::glob_match("**/id_rsa", "home/root/.ssh/notid_rsa"));
+    CHECK(!ft::glob_match("**/htpasswd", "etc/myhtpasswd"));
     CHECK(ft::glob_match("**/*.pem", "etc/ssl/server.pem"));
     CHECK(!ft::glob_match("**/*.pem", "etc/ssl/server.crt"));
     CHECK(ft::glob_match("**/id_rsa", "home/root/.ssh/id_rsa"));

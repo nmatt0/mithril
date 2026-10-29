@@ -14,9 +14,22 @@ static bool gm(const char* p, const char* s) {
     while (*p) {
         if (*p == '*') {
             if (p[1] == '*') {
-                while (*p == '*') ++p;   // collapse
-                if (*p == '/') ++p;      // "**/x" also matches "x" at root
-                if (!*p) return true;    // trailing ** matches the rest
+                while (*p == '*') ++p;       // collapse '**' (and any extra '*')
+                const bool sep = (*p == '/');
+                if (sep) ++p;                // consume the '/' in "**/..."
+                if (!*p) return true;        // trailing "**" (or "**/") matches the rest
+                if (sep) {
+                    // "**/tail": the tail must begin at a path-segment boundary
+                    // (the root, or just after a '/'), so "**/shadow" matches
+                    // "a/b/shadow" but not the "shadow" tail of "a/login.shadow".
+                    for (;;) {
+                        if (gm(p, s)) return true;
+                        while (*s && *s != '/') ++s;  // skip to end of this segment
+                        if (!*s) return false;
+                        ++s;                          // step over the '/'
+                    }
+                }
+                // "**tail" (no separator): the tail may start anywhere, crossing '/'.
                 for (;; ++s) {
                     if (gm(p, s)) return true;
                     if (!*s) return false;
