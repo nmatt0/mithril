@@ -59,6 +59,7 @@ add_executable(mithril
   src/keyweak.cpp
   src/keycorpus.cpp
   src/keys.cpp
+  src/configcred.cpp
   src/walk.cpp
   src/json.cpp
   src/human.cpp
@@ -137,6 +138,7 @@ if(Python3_Interpreter_FOUND)
   # These take the freshly built binary as argv[1].
   set(_mithril_py_tests
     test_secrets
+    test_config_cred
     test_der_keys
     test_keys
     test_boot

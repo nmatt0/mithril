@@ -13,6 +13,7 @@
 
 #include "binver.hpp"
 #include "boot.hpp"
+#include "configcred.hpp"
 #include "credstore.hpp"
 #include "derkey.hpp"
 #include "keys.hpp"
@@ -136,6 +137,12 @@ FileHits scan_one(const fs::path& path, const fs::path& root, const Passes& pass
         auto derkeys = scan_der_private_keys(reader);
         fh.secrets.insert(fh.secrets.end(), std::make_move_iterator(derkeys.begin()),
                           std::make_move_iterator(derkeys.end()));
+        // Structure-aware config credentials (JSON): short / encoded credential
+        // values in a parsed config that the flat-stream engine deliberately
+        // floors out. Category "config-credential".
+        auto cfg = scan_config_credentials(fh.path, fm.span());
+        fh.secrets.insert(fh.secrets.end(), std::make_move_iterator(cfg.begin()),
+                          std::make_move_iterator(cfg.end()));
     }
     if (passes.sbom) {
         fh.components = scan_sbom(fh.path, fm.span());  // M4 package DBs
