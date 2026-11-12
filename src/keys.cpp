@@ -139,6 +139,18 @@ std::vector<Finding> scan_keys(const std::string& path, std::span<const uint8_t>
             if (out_rsa) out_rsa->push_back(RsaKeyInfo{k.offset, k.n, k.e, k.bits});
         }
 
+        // 5b. DSA domain-parameter size. The security of DSA rests on the prime
+        //     p (the discrete-log modulus); below the 2048-bit floor it is
+        //     deprecated, and <1024 is broken. Reported under a DSA-specific type
+        //     so a DSA key is never mislabeled as RSA (GH #44).
+        if (k.algo == "DSA" && k.bits > 0 && k.bits < 2048) {
+            out.push_back(mk("dsa-weak-parameters", k.bits < 1024 ? "high" : "medium",
+                             Confidence::Structural, kind,
+                             "DSA prime p is " + std::to_string(k.bits) +
+                                 " bits: below the 2048-bit floor (deprecated)",
+                             "CWE-326", k.offset));
+        }
+
         // 6. EC small-scalar: a public point Q = d*G for a catastrophically small
         //    private scalar d (broken RNG / near-zero key generation — the Oct 2026
         //    eMudhra intermediate-CA compromise, P-384 scalars 4..237). A bounded
