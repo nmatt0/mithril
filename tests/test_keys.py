@@ -287,6 +287,24 @@ def main():
             genrsa(512, os.path.join(tree, "etc", "ssl", "private", "tiny512_pub.pem"))
             genrsa(1024, os.path.join(tree, "etc", "ssl", "private", "weak1024_pub.pem"))
             genrsa(2048, os.path.join(tree, "etc", "ssl", "private", "healthy2048_pub.pem"))
+            # A traditional-format DSA private key (GH #44): the key-weakness pass
+            # must report it as DSA (dsa-weak-parameters), never as an RSA key.
+            dsa_ok = False
+            dparams = os.path.join(d, "dsap.pem")
+            if subprocess.run(["openssl", "dsaparam", "-out", dparams, "1024"], cwd=d,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                dpk8 = os.path.join(d, "dsa_pk8.pem")
+                subprocess.run(["openssl", "gendsa", "-out", dpk8, dparams], cwd=d,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                dtrad = os.path.join(tree, "etc", "ssl", "private", "dsa1024_key.pem")
+                # Newer openssl emits PKCS#8 by default; -traditional forces the
+                # legacy "DSA PRIVATE KEY" form. Fall back if the flag is absent.
+                subprocess.run(["openssl", "dsa", "-in", dpk8, "-out", dtrad, "-traditional"],
+                               cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not (os.path.exists(dtrad) and b"DSA PRIVATE KEY" in open(dtrad, "rb").read()):
+                    subprocess.run(["openssl", "dsa", "-in", dpk8, "-out", dtrad],
+                                   cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                dsa_ok = os.path.exists(dtrad) and b"DSA PRIVATE KEY" in open(dtrad, "rb").read()
             # A normal self-signed 2048 cert -> must be silent.
             priv = os.path.join(d, "cert_priv.pem")
             subprocess.run(["openssl", "genrsa", "-out", priv, "2048"], cwd=d,
@@ -375,6 +393,16 @@ def main():
             if not flagged("weak1024_pub.pem", "rsa-weak-modulus"):
                 print("FAIL: 1024-bit RSA not flagged rsa-weak-modulus")
                 fails += 1
+            # GH #44: a traditional DSA key must be flagged as DSA, never RSA.
+            if dsa_ok:
+                if not flagged("dsa1024_key.pem", "dsa-weak-parameters"):
+                    print("FAIL: 1024-bit DSA key not flagged dsa-weak-parameters")
+                    fails += 1
+                rsa_mis = [h for h in kw if h["path"].endswith("dsa1024_key.pem")
+                           and h["type"].startswith("rsa-")]
+                if rsa_mis:
+                    print(f"FAIL: DSA key misparsed as RSA: {[h['type'] for h in rsa_mis]}")
+                    fails += 1
             # False positives: the healthy 2048 key/cert must produce no finding.
             for bad in ("healthy2048_pub.pem", "healthy_cert.pem"):
                 hits = [h for h in kw if h["path"].endswith(bad)]

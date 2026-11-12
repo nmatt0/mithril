@@ -210,9 +210,14 @@ std::optional<PublicKey> parse_pub_der(std::span<const uint8_t> der, KeyOrigin o
     return std::nullopt;
 }
 
-// The public half of a private key: for RSA, RSAPrivateKey SEQ { ver, n, e, ... }.
-// PKCS#8 wraps that in an OCTET STRING after the AlgId. Non-RSA -> algo only.
-std::optional<PublicKey> parse_priv_der(std::span<const uint8_t> der) {
+// The public half of a private key. Traditional PKCS#1 RSAPrivateKey and the
+// traditional DSAPrivateKey both begin SEQ { INTEGER version, INTEGER ... }, so
+// the leading INTEGER alone does not distinguish them; disambiguate by the PEM
+// key-type label (`kind`, e.g. "RSA PRIVATE KEY" / "DSA PRIVATE KEY"), falling
+// back to the field count (RSAPrivateKey has >=9 INTEGERs; DSAPrivateKey has 6)
+// when unlabeled. PKCS#8 wraps the key in an OCTET STRING after the AlgId, keyed
+// by OID. Non-RSA traditional-EC (second element OCTET STRING) -> algo only.
+std::optional<PublicKey> parse_priv_der(std::span<const uint8_t> der, std::string_view kind = {}) {
     auto outer = der_at(der, 0);
     if (!outer || outer->tag != 0x30) return std::nullopt;
     auto ver = der_at(der, outer->body);
@@ -221,7 +226,33 @@ std::optional<PublicKey> parse_priv_der(std::span<const uint8_t> der) {
     if (!nxt) return std::nullopt;
 
     PublicKey k;
-    if (nxt->tag == 0x02) {  // PKCS#1 RSAPrivateKey: ver, n, e, d, ...
+    if (nxt->tag == 0x02) {  // traditional RSAPrivateKey or DSAPrivateKey
+        // DSAPrivateKey ::= SEQ { version, p, q, g, y, x } -> 6 INTEGERs, no 'e'.
+        // RSAPrivateKey ::= SEQ { version, n, e, d, p, q, dp, dq, qinv } -> >=9.
+        bool labeled_dsa = kind.find("DSA") != std::string_view::npos;
+        bool labeled_rsa = kind.find("RSA") != std::string_view::npos;
+        bool is_dsa = labeled_dsa;
+        if (!labeled_dsa && !labeled_rsa) {  // unlabeled: decide structurally
+            size_t pos = outer->body;
+            int ints = 0;
+            bool all_int = true;
+            for (int i = 0; i < 12 && pos < outer->end; ++i) {
+                auto el = der_at(der, pos);
+                if (!el) break;
+                if (el->tag == 0x02) ++ints;
+                else all_int = false;
+                pos = el->end;
+            }
+            is_dsa = all_int && ints == 6;
+        }
+        if (is_dsa) {  // nxt is the DSA prime p; its bit length is the key size
+            std::vector<uint8_t> p = int_magnitude(der, *nxt);
+            if (p.empty()) return std::nullopt;
+            k.algo = "DSA";
+            k.bits = bit_length(p);
+            k.origin = KeyOrigin::PrivateKey;
+            return k;
+        }
         auto e = der_at(der, nxt->end);
         if (!e || e->tag != 0x02) return std::nullopt;
         k.algo = "RSA";
@@ -239,6 +270,7 @@ std::optional<PublicKey> parse_priv_der(std::span<const uint8_t> der) {
         if (!oid || oid->tag != 0x06) return std::nullopt;
         auto oct = der_at(der, nxt->end);
         if (!oct || oct->tag != 0x04) return std::nullopt;
+        if (oid_eq(der, *oid, OID_DSA)) { k.algo = "DSA"; k.origin = KeyOrigin::PrivateKey; return k; }
         if (oid_eq(der, *oid, OID_RSA)) {
             auto inner = der_at(der, oct->body);  // RSAPrivateKey
             if (!inner || inner->tag != 0x30) return std::nullopt;
@@ -398,7 +430,7 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
         if (pem.kind == "CERTIFICATE") {
             k = parse_cert(pem.der);
         } else if (is_private_pem(pem.kind)) {
-            k = parse_priv_der(pem.der);
+            k = parse_priv_der(pem.der, pem.kind);
         } else {  // PUBLIC KEY / RSA PUBLIC KEY / ...
             k = parse_pub_der(pem.der, KeyOrigin::PublicKeyInfo);
         }
