@@ -26,6 +26,7 @@ enum class KeyOrigin : uint8_t {
     SshPublicKey,  // an OpenSSH-format public key line (authorized_keys / *.pub)
     PublicKeyInfo, // a PEM/DER SubjectPublicKeyInfo or PKCS#1 RSA public key
     PrivateKey,    // the public half extracted from an embedded private key
+    CertificateRequest,  // a PKCS#10 certificate signing request (PEM / DER)
 };
 
 const char* origin_name(KeyOrigin o);

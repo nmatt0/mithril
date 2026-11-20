@@ -809,12 +809,13 @@ std::vector<Finding> scan_boot(const std::string& path, std::span<const uint8_t>
             return base.size() >= s.size() &&
                    base.compare(base.size() - s.size(), s.size(), s) == 0;
         };
-        std::vector<uint8_t> cert;
+        std::vector<std::vector<uint8_t>> certs;
         if (ends(".RSA") || ends(".DSA") || ends(".EC"))
-            cert = cert_from_pkcs7(data);
+            certs = certs_in_pkcs7(data);  // every cert: a chain need not list the signer first
         else if (ends(".x509.pem") || ends(".crt") || ends(".cer") || ends(".der") || ends(".pem"))
-            cert = cert_from_any(data);
-        if (!cert.empty()) {
+            certs.push_back(cert_from_any(data));
+        for (const auto& cert : certs) {
+            if (cert.empty()) continue;
             if (const KnownKey* kt = known_cert(cert_fingerprint(cert))) {
                 out.push_back(mk("apk-test-signing-cert", "high", std::string("cert = ") + kt->label,
                                  std::string("code-signing certificate is a known test key; its "

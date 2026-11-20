@@ -1745,7 +1745,33 @@ static void test_boot() {
         std::vector<uint8_t> junk(64, 0x11);
         CHECK(ft::certs_in_efi_signature_list(
                   std::span<const uint8_t>(junk.data(), junk.size())).empty());
-        CHECK(ft::cert_from_pkcs7(std::span<const uint8_t>(junk.data(), junk.size())).empty());
+        CHECK(ft::certs_in_pkcs7(std::span<const uint8_t>(junk.data(), junk.size())).empty());
+    }
+    // PKCS#7: a minimal SignedData holding two "certificates" (any SEQUENCE), bare
+    // and wrapped in ContentInfo { signedData, [0] EXPLICIT SignedData } (the
+    // on-disk form of an APK/OTA signature block). Both forms yield both certs in
+    // order; a ContentInfo of another content type yields none.
+    {
+        const std::vector<uint8_t> c1 = {0x30, 0x03, 0x02, 0x01, 0x01};
+        const std::vector<uint8_t> c2 = {0x30, 0x03, 0x02, 0x01, 0x02};
+        // SignedData = SEQ { INTEGER 1, SET {}, SEQ { OID data }, [0] { c1 c2 }, SET {} }
+        std::vector<uint8_t> body = {0x02, 0x01, 0x01, 0x31, 0x00, 0x30, 0x0B, 0x06, 0x09,
+                                     0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01,
+                                     0xA0, 0x0A};
+        body.insert(body.end(), c1.begin(), c1.end());
+        body.insert(body.end(), c2.begin(), c2.end());
+        body.insert(body.end(), {0x31, 0x00});
+        std::vector<uint8_t> sd = {0x30, uint8_t(body.size())};
+        sd.insert(sd.end(), body.begin(), body.end());
+        std::vector<uint8_t> ci = {0x30, uint8_t(13 + sd.size()), 0x06, 0x09, 0x2A, 0x86, 0x48,
+                                   0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02, 0xA0, uint8_t(sd.size())};
+        ci.insert(ci.end(), sd.begin(), sd.end());
+        const std::vector<std::vector<uint8_t>> both = {c1, c2};
+        CHECK(ft::certs_in_pkcs7(sd) == both);
+        CHECK(ft::certs_in_pkcs7(ci) == both);
+        std::vector<uint8_t> data_ci = ci;
+        data_ci[12] = 0x01;  // contentType 1.2.840.113549.1.7.1 (data)
+        CHECK(ft::certs_in_pkcs7(data_ci).empty());
     }
 
     // FDT parser safety: garbage and truncated/invalid headers reject cleanly.
