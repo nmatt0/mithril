@@ -327,6 +327,69 @@ def main():
             sigsize = 16 + len(wc)
             esl = x509_guid + struct.pack("<III", 28 + sigsize, 0, sigsize) + b"\x00" * 16 + wc
             open(os.path.join(tree, "etc", "ssl", "uefi_pk.esl"), "wb").write(esl)
+            # Certificate containers: a weak 1024-bit key, wrapped each way firmware
+            # ships certificates besides a plain CERTIFICATE. The PKCS#7 bundles put a
+            # healthy 2048-bit cert first, so every cert is read and only the weak
+            # one is flagged.
+            cdir = os.path.join(tree, "etc", "ssl", "containers")
+            os.makedirs(os.path.join(cdir, "META-INF"))
+            def ossl(*args):
+                subprocess.run(["openssl", *args], cwd=d,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ossl("req", "-x509", "-newkey", "rsa:1024", "-nodes", "-keyout", "cw.key",
+                 "-subj", "/CN=container-weak", "-days", "1", "-out", "cw.pem")
+            ossl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ch.key",
+                 "-subj", "/CN=container-healthy", "-days", "1", "-out", "ch.pem")
+            ossl("x509", "-in", "cw.pem", "-trustout", "-addtrust", "serverAuth",
+                 "-out", os.path.join(cdir, "trusted.pem"))
+            cw_pem = open(os.path.join(d, "cw.pem")).read()
+            open(os.path.join(cdir, "legacy.pem"), "w").write(
+                cw_pem.replace(" CERTIFICATE-----", " X509 CERTIFICATE-----"))
+            # A v1 certificate (no version field, no extensions; old embedded
+            # self-signed certs): its TBS also starts with an INTEGER, so it must
+            # not be mistaken for a CSR. Derived from cw.pem by dropping the
+            # version and extensions from its TBS (signatures are not verified).
+            def der_children(tlv):
+                n, i = tlv[1], 2
+                if n & 0x80:
+                    i += n & 0x7F
+                out = []
+                while i < len(tlv):
+                    t, n, j = tlv[i], tlv[i + 1], i + 2
+                    if n & 0x80:
+                        k = n & 0x7F
+                        n, j = int.from_bytes(tlv[j:j + k], "big"), j + k
+                    out.append((t, tlv[i:j + n]))
+                    i = j + n
+                return out
+            def seq_of(parts):
+                body = b"".join(parts)
+                return b"\x30" + der_len(len(body)) + body
+            cw_der = base64.b64decode("".join(cw_pem.strip().splitlines()[1:-1]))
+            tbs, alg, sig = [t for _, t in der_children(cw_der)]
+            v1_tbs = seq_of([t for tag, t in der_children(tbs) if tag not in (0xA0, 0xA3)])
+            open(os.path.join(cdir, "v1.der"), "wb").write(seq_of([v1_tbs, alg, sig]))
+            ossl("req", "-new", "-key", "cw.key", "-subj", "/CN=container-weak",
+                 "-out", os.path.join(cdir, "request.csr"))
+            csr = open(os.path.join(cdir, "request.csr")).read()
+            open(os.path.join(cdir, "request_new.csr"), "w").write(
+                csr.replace(" CERTIFICATE REQUEST-----", " NEW CERTIFICATE REQUEST-----"))
+            ossl("req", "-in", os.path.join(cdir, "request.csr"), "-outform", "DER",
+                 "-out", os.path.join(cdir, "request.der"))
+            ossl("crl2pkcs7", "-nocrl", "-certfile", "ch.pem", "-certfile", "cw.pem",
+                 "-out", os.path.join(cdir, "bundle.p7b.pem"))
+            ossl("crl2pkcs7", "-nocrl", "-certfile", "ch.pem", "-certfile", "cw.pem",
+                 "-outform", "DER", "-out", os.path.join(cdir, "bundle.p7b"))
+            # An APK/JAR signature block: CMS SignedData in its ContentInfo form.
+            open(os.path.join(d, "payload"), "wb").write(b"classes.dex")
+            ossl("cms", "-sign", "-binary", "-in", "payload", "-signer", "cw.pem",
+                 "-inkey", "cw.key", "-outform", "DER", "-out", os.path.join(cdir, "META-INF", "CERT.RSA"))
+            # A compromised eMudhra intermediate as a TRUSTED CERTIFICATE: the corpus
+            # fingerprint covers the certificate, not the trust settings after it.
+            if have_emudhra:
+                ossl("x509", "-inform", "DER", "-in", os.path.join(emudhra_dir, "EMOVTLSCAG3C.crt"),
+                     "-trustout", "-addtrust", "serverAuth",
+                     "-out", os.path.join(cdir, "emudhra_trusted.pem"))
 
         rep = run_json(binary, tree)
         kw = rep.get("key_weakness", [])
@@ -417,6 +480,24 @@ def main():
             if not on("uefi_pk.esl", "rsa-tiny-modulus"):
                 print("FAIL: weak key inside an EFI_SIGNATURE_LIST not flagged (unwrap failed)")
                 fails += 1
+            # Certificate containers: exactly one rsa-weak-modulus per container (the
+            # healthy cert in each bundle adds none), labeled certificate or, for a
+            # CSR, certificate-request.
+            for fn in ("trusted.pem", "legacy.pem", "v1.der", "request.csr", "request_new.csr",
+                       "request.der", "bundle.p7b.pem", "bundle.p7b", "CERT.RSA"):
+                hits = [h for h in kw if os.path.basename(h["path"]) == fn]
+                want = "certificate-request" if fn.startswith("request") else "certificate"
+                if [h["type"] for h in hits] != ["rsa-weak-modulus"]:
+                    print(f"FAIL: {fn}: want one rsa-weak-modulus, got {[h['type'] for h in hits]}")
+                    fails += 1
+                elif not hits[0]["label"].endswith(" " + want):
+                    print(f"FAIL: {fn}: labeled {hits[0]['label']!r}, want ... {want}")
+                    fails += 1
+            if have_emudhra and not any(os.path.basename(h["path"]) == "emudhra_trusted.pem" and
+                                        "emudhra" in h["label"].lower()
+                                        for h in by_type.get("leaked-key", [])):
+                print("FAIL: eMudhra cert as TRUSTED CERTIFICATE not named by the leaked-key corpus")
+                fails += 1
 
         # --- EC small-scalar assertions ---
         import re as _re
@@ -473,6 +554,15 @@ def main():
                 b[random.randrange(len(b))] = random.randrange(256)
             open(os.path.join(fuzz, f"m{it}.bin"), "wb").write(bytes(b))
         open(os.path.join(fuzz, "random.bin"), "wb").write(random.randbytes(64 * 1024))
+        # ...and of a DER PKCS#7 bundle, through the whole-file unwrap.
+        p7 = os.path.join(tree, "etc", "ssl", "containers", "bundle.p7b")
+        if os.path.exists(p7):
+            seed7 = open(p7, "rb").read()
+            for it in range(200):
+                b = bytearray(seed7)
+                for _ in range(random.randint(1, 8)):
+                    b[random.randrange(len(b))] = random.randrange(256)
+                open(os.path.join(fuzz, f"p{it}.der"), "wb").write(bytes(b))
         try:
             run_json(binary, tree)  # raises on crash / invalid JSON
         except Exception as ex:

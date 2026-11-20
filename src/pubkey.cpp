@@ -23,6 +23,7 @@ const char* origin_name(KeyOrigin o) {
         case KeyOrigin::SshPublicKey: return "ssh-public-key";
         case KeyOrigin::PublicKeyInfo: return "public-key";
         case KeyOrigin::PrivateKey: return "private-key";
+        case KeyOrigin::CertificateRequest: return "certificate-request";
     }
     return "public-key";
 }
@@ -169,20 +170,31 @@ bool parse_spki(std::span<const uint8_t> d, const Der& spki, PublicKey& k) {
 
 // A DER X.509 certificate: SEQ { tbsCertificate SEQ {...}, sigAlg, sig }. Find the
 // SubjectPublicKeyInfo inside tbs by trying each child SEQUENCE (issuer/subject are
-// also SEQUENCEs, but only the SPKI parses as one). Fingerprint = SHA-256 of DER.
+// also SEQUENCEs, but only the SPKI parses as one). Fingerprint = SHA-256 of the
+// certificate's own DER, so bytes after it (a TRUSTED CERTIFICATE's trust settings)
+// do not change it. A PKCS#10 request has the same outer shape, and its
+// CertificationRequestInfo { INTEGER version, Name subject, SPKI, [0] } parses the
+// same way. It is told apart by the Name (a SEQUENCE of SETs) after the leading
+// INTEGER, where a v1 certificate's serial is followed by an AlgorithmIdentifier.
 std::optional<PublicKey> parse_cert(std::span<const uint8_t> der) {
     auto outer = der_at(der, 0);
     if (!outer || outer->tag != 0x30) return std::nullopt;
     auto tbs = der_at(der, outer->body);
     if (!tbs || tbs->tag != 0x30) return std::nullopt;
+    bool request = false;
+    if (auto ver = der_at(der, tbs->body); ver && ver->tag == 0x02) {
+        auto name = der_at(der, ver->end);
+        auto rdn = name && name->len ? der_at(der, name->body) : std::nullopt;
+        request = name && name->tag == 0x30 && (name->len == 0 || (rdn && rdn->tag == 0x31));
+    }
     for (size_t i = tbs->body; i < tbs->end;) {
         auto child = der_at(der, i);
         if (!child) break;
         if (child->tag == 0x30) {
             PublicKey k;
             if (parse_spki(der, *child, k)) {
-                k.origin = KeyOrigin::Certificate;
-                k.fp_der = hexpre(der);
+                k.origin = request ? KeyOrigin::CertificateRequest : KeyOrigin::Certificate;
+                k.fp_der = hexpre(der.first(outer->end));
                 return k;
             }
         }
@@ -415,6 +427,19 @@ bool is_private_pem(const std::string& kind) {
     return kind.find("PRIVATE KEY") != std::string::npos;
 }
 
+// A certificate, or a request carrying a key: RFC 7468 CERTIFICATE and CERTIFICATE
+// REQUEST, plus OpenSSL's legacy X509 CERTIFICATE and NEW CERTIFICATE REQUEST, and
+// its TRUSTED CERTIFICATE (a certificate followed by trust settings).
+bool is_cert_pem(const std::string& kind) {
+    return kind == "CERTIFICATE" || kind == "TRUSTED CERTIFICATE" || kind == "X509 CERTIFICATE" ||
+           kind == "CERTIFICATE REQUEST" || kind == "NEW CERTIFICATE REQUEST";
+}
+
+// A PKCS#7 / CMS SignedData (a .p7b/.p7c certificate bundle, a signature).
+bool is_pkcs7_pem(const std::string& kind) {
+    return kind == "PKCS7" || kind == "CMS" || kind == "PKCS #7 SIGNED DATA";
+}
+
 }  // namespace
 
 std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
@@ -426,8 +451,18 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
 
     // 1. PEM blocks (certificates, public keys, private keys).
     for (auto& pem : find_pem(text)) {
+        if (is_pkcs7_pem(pem.kind)) {  // a bundle: every certificate in it
+            for (auto& der : certs_in_pkcs7(pem.der)) {
+                if (auto c = parse_cert(der)) {
+                    c->offset = pem.offset;
+                    set_label(*c);
+                    out.push_back(std::move(*c));
+                }
+            }
+            continue;
+        }
         std::optional<PublicKey> k;
-        if (pem.kind == "CERTIFICATE") {
+        if (is_cert_pem(pem.kind)) {
             k = parse_cert(pem.der);
         } else if (is_private_pem(pem.kind)) {
             k = parse_priv_der(pem.der, pem.kind);
@@ -466,6 +501,14 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
         if (auto k = parse_cert(data)) { set_label(*k); out.push_back(std::move(*k)); }
         else if (auto k2 = parse_pub_der(data, KeyOrigin::PublicKeyInfo)) {
             set_label(*k2); out.push_back(std::move(*k2));
+        }
+    }
+
+    // 3b. Whole-buffer DER PKCS#7 / CMS (a .p7b bundle, an APK/JAR META-INF/*.RSA
+    //     signature block): every certificate it carries.
+    if (!data.empty() && data[0] == 0x30) {
+        for (auto& der : certs_in_pkcs7(data)) {
+            if (auto k = parse_cert(der)) { set_label(*k); out.push_back(std::move(*k)); }
         }
     }
 

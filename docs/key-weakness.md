@@ -21,8 +21,12 @@ Two failure classes, following the standard taxonomy (see the research survey th
 
 `src/pubkey.cpp`, text-anchored like the secrets engine because that is how firmware carries keys:
 
-- **X.509 certificates** — PEM `CERTIFICATE`, and a whole-file bare DER cert. The `SubjectPublicKeyInfo`
-  is located by trying each `tbsCertificate` child SEQUENCE (only the SPKI parses as one).
+- **X.509 certificates** — PEM `CERTIFICATE` (and OpenSSL's `X509 CERTIFICATE` / `TRUSTED CERTIFICATE`),
+  a whole-file bare DER cert, and every certificate in a PKCS#7 / CMS bundle (PEM `PKCS7` / `CMS`, or DER
+  such as a `.p7b` or an APK `META-INF/*.RSA`). The `SubjectPublicKeyInfo` is located by trying each
+  `tbsCertificate` child SEQUENCE (only the SPKI parses as one).
+- **Certificate requests** — the requested key in a PKCS#10 CSR (PEM `CERTIFICATE REQUEST` / `NEW
+  CERTIFICATE REQUEST`, or DER), labeled `certificate-request`.
 - **OpenSSH public keys** — `ssh-rsa` / `ssh-ed25519` / `ssh-dss` / `ecdsa-sha2-*` lines in
   `authorized_keys`, `*.pub`, `known_hosts`. Decoded from the SSH wire format (length-prefixed fields).
 - **PEM/DER public keys** — a `SubjectPublicKeyInfo` or a bare PKCS#1 `RSAPublicKey`.
