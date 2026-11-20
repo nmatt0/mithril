@@ -15,6 +15,10 @@ Covers the three finding classes end to end, all offline (no network):
   * STRUCTURAL — 512/1024-bit RSA keys (openssl) must be flagged
     rsa-tiny/rsa-weak-modulus; a healthy 2048-bit key and a normal cert must be
     silent (no ROCA, no weakness) — the false-positive guard.
+  * NOT KEYS — DH / X9.42 DH / DSA parameters, a traditional DSA public key, an
+    SSL session, a DH PEM string inside a binary and DER signature files share
+    the RSAPublicKey shape; none may be reported as a key, while an unlabeled
+    bare PKCS#1 RSA key still is. Pure Python.
 
 Plus a crash-safety sweep: truncations and byte-flip mutations of the fixtures in
 the tree; the scan must complete with valid JSON and no crash.
@@ -267,6 +271,101 @@ def main():
                     shutil.copy(os.path.join(emudhra_dir, cn),
                                 os.path.join(tree, "etc", "ssl", "emudhra", cn))
 
+        # --- NOT KEYS: non-key ASN.1 with the RSAPublicKey shape (pure Python) ---
+        # A PKCS#3 DHParameter is SEQ { INTEGER p, INTEGER g } and an (EC)DSA
+        # signature is SEQ { INTEGER r, INTEGER s }, the shape of RSAPublicKey
+        # { n, e }. DSA / X9.42 DH parameters, a traditional DSA public key and an
+        # SSL session start with it too. None of these is a key, yet each was read
+        # as RSA: DH g=2 -> rsa-even-exponent, a signature's r -> rsa-tiny-modulus,
+        # the session's version 1 -> a 1-bit "modulus" flagged roca-key, and
+        # signature r values with a common small factor -> shared-prime.
+        nonkey = os.path.join(tree, "etc", "nonkey")
+        os.makedirs(nonkey)
+
+        def der_seq(*ints, tail=b""):
+            body = b"".join(der_int(v) for v in ints) + tail
+            return b"\x30" + der_len(len(body)) + body
+
+        def pem_block(label, der):
+            b64 = base64.b64encode(der).decode()
+            lines = "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64))
+            return f"-----BEGIN {label}-----\n{lines}\n-----END {label}-----\n"
+
+        # RFC 7919 ffdhe2048 and RFC 2409 group 2 (1024-bit MODP): safe primes.
+        ffdhe2048 = int(
+            "FFFFFFFFFFFFFFFFADF85458A2BB4A9AAFDC5620273D3CF1D8B9C583CE2D3695A9E13641146433FBCC93"
+            "9DCE249B3EF97D2FE363630C75D8F681B202AEC4617AD3DF1ED5D5FD65612433F51F5F066ED085636555"
+            "3DED1AF3B557135E7F57C935984F0C70E0E68B77E2A689DAF3EFE8721DF158A136ADE73530ACCA4F483A"
+            "797ABC0AB182B324FB61D108A94BB2C8E3FBB96ADAB760D7F4681D4F42A3DE394DF4AE56EDE76372BB19"
+            "0B07A7C8EE0A6D709E02FCE1CDF7E2ECC03404CD28342F619172FE9CE98583FF8E4F1232EEF28183C3FE"
+            "3B1B4C6FAD733BB5FCBC2EC22005C58EF1837D1683B2C6F34A26C1B2EFFA886B423861285C97FFFFFFFF"
+            "FFFFFFFF", 16)
+        modp1024 = int(
+            "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A"
+            "08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9"
+            "A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFF"
+            "FFFF", 16)
+        dsa_q = _gen_prime(160)
+        dsa_g = random.getrandbits(1022) | 1
+        dh2048 = der_seq(ffdhe2048, 2)
+        dh1024_plen = der_seq(modp1024, 2, 160)  # with the optional privateValueLength
+        dsaparam = der_seq(modp1024, dsa_q, dsa_g)
+        session = der_seq(1, 0x0303, tail=b"\x04\x02\xc0\x30")  # version, TLS 1.2, cipher
+        nonkey_files = {
+            "dh2048.pem": pem_block("DH PARAMETERS", dh2048).encode(),
+            "dh1024_plen.pem": pem_block("DH PARAMETERS", dh1024_plen).encode(),
+            "x942.pem": pem_block("X9.42 DH PARAMETERS",
+                                  der_seq(modp1024, random.getrandbits(1022) << 1, dsa_q)).encode(),
+            "dsaparam.pem": pem_block("DSA PARAMETERS", dsaparam).encode(),
+            "dsa_trad_pub.pem": pem_block("DSA PUBLIC KEY",
+                                          der_seq(random.getrandbits(1020), modp1024, dsa_q, dsa_g)).encode(),
+            "session.pem": pem_block("SSL SESSION PARAMETERS", session).encode(),
+            # A daemon binary carrying its default DH group as a PEM string.
+            "libdaemon.so": random.randbytes(512) + pem_block("DH PARAMETERS", dh2048).encode() +
+                            random.randbytes(512),
+            # Whole-file DER, no label: the 2- and 3-field DH forms, DSA
+            # parameters and a DER session.
+            "dh2048.der": dh2048,
+            "dh1024_plen.der": dh1024_plen,
+            "dsaparam.der": dsaparam,
+            "session.der": session,
+        }
+        # Detached DER ECDSA/DSA signatures (fw.sig-style): P-256 x4, P-384, P-521,
+        # DSA-160. Two P-256 r values are forced even, so the batch-GCD would see
+        # a shared factor of 2. fw3 (odd s) is rejected only by the modulus floor,
+        # fw5 (P-521, odd s >= 2^256) only by the exponent bound.
+        for i, bits in enumerate((256, 256, 256, 256, 384, 521, 160)):
+            r, s = random.getrandbits(bits) | (1 << (bits - 1)), random.getrandbits(bits)
+            if i < 2:
+                r &= ~1
+            if i == 3:
+                s |= 1
+            if bits == 521:
+                s |= 1 | (1 << 520)
+            nonkey_files[f"fw{i}.sig"] = der_seq(r, s)
+        for fn, data in nonkey_files.items():
+            open(os.path.join(nonkey, fn), "wb").write(data)
+
+        # ...while a real bare PKCS#1 RSAPublicKey, unlabeled, is still read as RSA:
+        # 1024-bit e=65537, 1024-bit e=3 (p, q == 2 mod 3, as e=3 requires), and a
+        # 512-bit key (the smallest modulus accepted unlabeled).
+        def gen_prime_2mod3(bits):
+            while True:
+                p = _gen_prime(bits)
+                if p % 3 == 2:
+                    return p
+        while True:  # exactly 512 bits: the boundary itself
+            n512 = _gen_prime(256) * _gen_prime(256)
+            if n512.bit_length() == 512:
+                break
+        bare_rsa = {
+            "rsa1024_pkcs1.der": der_seq(_gen_prime(512) * _gen_prime(512), 65537),
+            "rsa1024_e3_pkcs1.der": der_seq(gen_prime_2mod3(512) * gen_prime_2mod3(512), 3),
+            "rsa512_pkcs1.der": der_seq(n512, 65537),
+        }
+        for fn, data in bare_rsa.items():
+            open(os.path.join(tree, "etc", "ssl", fn), "wb").write(data)
+
         # --- STRUCTURAL + false-positive fixtures (openssl) ---
         if have_openssl:
             # Healthy EC keys (real random scalars) -> must be silent (FP guard).
@@ -383,6 +482,20 @@ def main():
                 print(f"FAIL: {h['type']} tier {h.get('confidence_tier')} != validated")
                 fails += 1
 
+        # --- NOT KEYS: no finding of any kind on the non-key structures ---
+        nonkey_hits = [h for h in kw if "nonkey" in h["path"].split("/")]
+        if nonkey_hits:
+            print("FAIL: non-key ASN.1 read as a key: " +
+                  ", ".join(f"{os.path.basename(h['path'])}:{h['type']}" for h in nonkey_hits))
+            fails += len(nonkey_hits)
+        # ...and the unlabeled bare PKCS#1 keys are still analyzed as RSA.
+        for fn, typ in (("rsa1024_pkcs1.der", "rsa-weak-modulus"),
+                        ("rsa1024_e3_pkcs1.der", "rsa-weak-modulus"),
+                        ("rsa512_pkcs1.der", "rsa-tiny-modulus")):
+            if not on(fn, typ):
+                print(f"FAIL: unlabeled bare PKCS#1 key {fn} not flagged {typ}")
+                fails += 1
+
         # --- STRUCTURAL + false positives ---
         if have_openssl:
             def flagged(path_end, typ):
@@ -486,7 +599,9 @@ def main():
             print(f"PASS: {n_leaked} leaked/default keys matched (host+authorized impact), "
                   f"ROCA + Fermat + Wiener + batch-GCD recoveries detected, EC small-scalar "
                   f"across 4 curves (synthetic{em}) + EC false-positive guard, structural bands + "
-                  f"false-positive guard, crash-safe over truncations/mutations{extra}")
+                  f"false-positive guard, {len(nonkey_files)} non-key DH/DSA/session/signature "
+                  f"structures not read as keys (bare PKCS#1 still read), crash-safe over "
+                  f"truncations/mutations{extra}")
             return 0
         return 1
 

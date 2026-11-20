@@ -25,7 +25,14 @@ Two failure classes, following the standard taxonomy (see the research survey th
   is located by trying each `tbsCertificate` child SEQUENCE (only the SPKI parses as one).
 - **OpenSSH public keys** — `ssh-rsa` / `ssh-ed25519` / `ssh-dss` / `ecdsa-sha2-*` lines in
   `authorized_keys`, `*.pub`, `known_hosts`. Decoded from the SSH wire format (length-prefixed fields).
-- **PEM/DER public keys** — a `SubjectPublicKeyInfo` or a bare PKCS#1 `RSAPublicKey`.
+- **PEM/DER public keys** — a `SubjectPublicKeyInfo` or a bare PKCS#1 `RSAPublicKey`. A bare
+  `RSAPublicKey` is only `SEQUENCE { INTEGER n, INTEGER e }`, which is also the shape of PKCS#3 DH
+  parameters `{ p, g }` and of an (EC)DSA signature `{ r, s }`, and DSA / X9.42 DH parameters and SSL
+  sessions begin with it. So it is read as RSA only under an `RSA PUBLIC KEY` or `PUBLIC KEY` label, never
+  under `DH PARAMETERS`, `DSA PARAMETERS`, `SSL SESSION PARAMETERS` or similar. Unlabeled (a whole-file DER
+  blob such as a `.der` or `.sig`), the values must also fit RSA: exactly two INTEGERs, `n` >= 512 bits,
+  and `e` odd and below 2^256. An unlabeled two-field DH group with an odd generator (3 or 5) still
+  passes, because telling its prime from an RSA modulus would take a primality test.
 - **Private keys** — the public half (modulus `n`, exponent `e`) is pulled from PEM `PRIVATE KEY` blocks
   (PKCS#1 and PKCS#8 RSA), so an embedded private key is checked for weakness too.
 

@@ -117,6 +117,34 @@ bool fill_rsa(std::span<const uint8_t> d, const Der& seq, PublicKey& k) {
     return !k.n.empty();
 }
 
+// An unlabeled SEQ { INTEGER, INTEGER } is ambiguous. PKCS#3 DHParameter
+// { p, g } and the (EC)DSA signature value { r, s } have exactly the
+// RSAPublicKey { n, e } shape. DSA and X9.42 DH domain parameters, a
+// traditional DSA public key, an SSL session and a multi-prime RSAPrivateKey
+// all begin with it. With no PEM label or OID to say which, read it as RSA only
+// when the values meet RSA's own constraints:
+//   * exactly two INTEGERs: RSAPublicKey has no other fields;
+//   * n >= 512 bits: no real RSA modulus is smaller, and a signature's r is
+//     <= 521 bits, paired with an s too large for the next rule;
+//   * e odd and < 2^256 (PKCS#1; FIPS 186-5): a DH generator is usually 2, and
+//     a signature's s is as wide as its r.
+// A DH group with an odd generator (3 or 5) still passes. Telling its prime p
+// from an RSA modulus needs a primality test, and at >= 2048 bits no RSA check
+// fires on it.
+bool plausible_bare_rsa(std::span<const uint8_t> d, const Der& seq) {
+    std::vector<Der> ints;
+    for (size_t pos = seq.body; pos < seq.end;) {
+        auto el = der_at(d, pos);
+        if (!el || el->tag != 0x02 || el->end > seq.end || ints.size() == 2) return false;
+        ints.push_back(*el);
+        pos = el->end;
+    }
+    if (ints.size() != 2) return false;
+    std::vector<uint8_t> n = int_magnitude(d, ints[0]), e = int_magnitude(d, ints[1]);
+    if (bit_length(n) < 512) return false;
+    return !e.empty() && (e.back() & 1) == 1 && bit_length(e) <= 256;
+}
+
 // Parse a SubjectPublicKeyInfo SEQ { AlgId SEQ { OID [,params] }, BIT STRING }.
 // Fills algo/curve/RSA fields. Returns false if it is not a recognizable SPKI.
 bool parse_spki(std::span<const uint8_t> d, const Der& spki, PublicKey& k) {
@@ -192,7 +220,15 @@ std::optional<PublicKey> parse_cert(std::span<const uint8_t> der) {
 }
 
 // A DER public key: a SubjectPublicKeyInfo, or a bare PKCS#1 RSAPublicKey.
-std::optional<PublicKey> parse_pub_der(std::span<const uint8_t> der, KeyOrigin origin) {
+// `kind` is the PEM label, or empty for an unlabeled whole-file DER blob. An SPKI
+// names its own key type by OID, so it is accepted under any label. A bare
+// RSAPublicKey is only SEQ { INTEGER n, INTEGER e }, a shape that non-key
+// structures share, so it is read as RSA only under the "RSA PUBLIC KEY" or
+// "PUBLIC KEY" label, or, unlabeled, if plausible_bare_rsa() accepts it. Under
+// any other label (DH / X9.42 DH / DSA PARAMETERS, SSL SESSION PARAMETERS,
+// DSA PUBLIC KEY, ...) it is not a key.
+std::optional<PublicKey> parse_pub_der(std::span<const uint8_t> der, KeyOrigin origin,
+                                       std::string_view kind) {
     auto outer = der_at(der, 0);
     if (!outer || outer->tag != 0x30) return std::nullopt;
     PublicKey k;
@@ -202,7 +238,9 @@ std::optional<PublicKey> parse_pub_der(std::span<const uint8_t> der, KeyOrigin o
         return k;
     }
     // Bare PKCS#1 RSAPublicKey: SEQ { INTEGER n, INTEGER e }.
-    if (fill_rsa(der, *outer, k)) {
+    bool rsa_ok = kind.empty() ? plausible_bare_rsa(der, *outer)
+                               : (kind == "RSA PUBLIC KEY" || kind == "PUBLIC KEY");
+    if (rsa_ok && fill_rsa(der, *outer, k)) {
         k.origin = origin;
         k.fp_der = hexpre(der);
         return k;
@@ -431,8 +469,12 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
             k = parse_cert(pem.der);
         } else if (is_private_pem(pem.kind)) {
             k = parse_priv_der(pem.der, pem.kind);
-        } else {  // PUBLIC KEY / RSA PUBLIC KEY / ...
-            k = parse_pub_der(pem.der, KeyOrigin::PublicKeyInfo);
+        } else {  // PUBLIC KEY / RSA PUBLIC KEY / ..., or a non-key block
+            // The label decides whether a bare SEQ { INTEGER, INTEGER } may be
+            // read as RSA. A DH PARAMETERS body is SEQ { INTEGER p, INTEGER g },
+            // the RSAPublicKey shape: read as RSA, its prime p became the
+            // modulus and the generator g = 2 an even exponent.
+            k = parse_pub_der(pem.der, KeyOrigin::PublicKeyInfo, pem.kind);
         }
         if (k) { k->offset = pem.offset; set_label(*k); out.push_back(std::move(*k)); }
     }
@@ -461,10 +503,12 @@ std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data) {
         }
     }
 
-    // 3. Whole-buffer bare DER (a .der/.crt file, or a DER SPKI).
+    // 3. Whole-buffer bare DER (a .der/.crt file, a DER SPKI, or a bare PKCS#1
+    //    RSAPublicKey). Unlabeled, so a bare RSAPublicKey must pass
+    //    plausible_bare_rsa() (a DER dhparam or ECDSA signature file is not one).
     if (!data.empty() && data[0] == 0x30) {
         if (auto k = parse_cert(data)) { set_label(*k); out.push_back(std::move(*k)); }
-        else if (auto k2 = parse_pub_der(data, KeyOrigin::PublicKeyInfo)) {
+        else if (auto k2 = parse_pub_der(data, KeyOrigin::PublicKeyInfo, {})) {
             set_label(*k2); out.push_back(std::move(*k2));
         }
     }
