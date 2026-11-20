@@ -247,6 +247,27 @@ def _cert_from_p7(d):
     return None
 
 
+def _tlv(tag, body):
+    n = len(body)
+    ln = bytes([n]) if n < 0x80 else bytes([0x80 | ((n.bit_length() + 7) // 8)]) + \
+        n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([tag]) + ln + body
+
+
+def content_info_signed(signed_data):
+    """Wrap a bare SignedData as ContentInfo { signedData, [0] EXPLICIT SignedData },
+    the on-disk form of an APK/JAR/OTA signature block (`openssl pkcs7 -inform DER`
+    reads only this form)."""
+    oid_signed_data = bytes.fromhex("06092a864886f70d010702")  # 1.2.840.113549.1.7.2
+    return _tlv(0x30, oid_signed_data + _tlv(0xA0, signed_data))
+
+
+def signed_data_with_certs(certs):
+    """A certs-only SignedData { 1, {}, { data }, [0] certs, {} }."""
+    return _tlv(0x30, bytes.fromhex("020101" "3100" "300b06092a864886f70d010701") +
+                _tlv(0xA0, b"".join(certs)) + bytes.fromhex("3100"))
+
+
 def efi_sig_list(cert):
     sigsize = 16 + len(cert)
     return X509GUID + struct.pack("<III", 28 + sigsize, 0, sigsize) + b"\x00" * 16 + cert
@@ -436,6 +457,18 @@ def main():
           "apk: AOSP platform test cert (PEM) detected")
     h = run("CERT.RSA", AMI_P7)
     check("apk-test-signing-cert" in types(h), "apk: PKCS#7 signature block cert matched")
+    h = run("CERT.RSA", content_info_signed(AMI_P7))
+    check("apk-test-signing-cert" in types(h),
+          "apk: ContentInfo-wrapped PKCS#7 signature block (the on-disk form) cert matched")
+    # A block carrying a chain lists certificates in no fixed order (JAR blocks
+    # often put the CA first): the known cert is found when it is not first.
+    ami = _cert_from_p7(AMI_P7)
+    other = ami[:-1] + bytes([ami[-1] ^ 1])  # same shape, a fingerprint not in the corpus
+    h = run("CERT.RSA", content_info_signed(signed_data_with_certs([other, ami])))
+    check("apk-test-signing-cert" in types(h),
+          "apk: known cert matched when it is not the first in the signature block")
+    h = run("CERT.RSA", content_info_signed(signed_data_with_certs([other])))
+    check("apk-test-signing-cert" not in types(h), "apk: unknown cert alone is not flagged")
 
     # --- AMI NVAR variable store (the format most vendor BIOSes use) ---
     ami_cert = _cert_from_p7(AMI_P7)

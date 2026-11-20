@@ -100,22 +100,48 @@ std::vector<std::vector<uint8_t>> certs_in_efi_signature_list(std::span<const ui
     return out;
 }
 
-std::vector<uint8_t> cert_from_pkcs7(std::span<const uint8_t> der) {
-    auto outer = der_at(der, 0);
-    if (!outer || outer->tag != 0x30) return {};
-    size_t i = outer->content;
-    while (i < outer->end) {
+std::vector<std::vector<uint8_t>> certs_in_pkcs7(std::span<const uint8_t> der) {
+    // id-signedData, 1.2.840.113549.1.7.2
+    static constexpr uint8_t kOidSignedData[] = {0x2A, 0x86, 0x48, 0x86, 0xF7,
+                                                 0x0D, 0x01, 0x07, 0x02};
+    std::vector<std::vector<uint8_t>> out;
+    auto sd = der_at(der, 0);
+    if (!sd || sd->tag != 0x30) return out;
+    auto first = der_at(der, sd->content);
+    if (!first || first->end > sd->end) return out;
+    if (first->tag == 0x06) {
+        // ContentInfo { contentType OID, content [0] EXPLICIT }: the standard
+        // form. Step into the SignedData. Any other content type (envelopedData,
+        // data, ...) carries no certificate set.
+        if (first->end - first->content != sizeof(kOidSignedData) ||
+            !std::equal(kOidSignedData, kOidSignedData + sizeof(kOidSignedData),
+                        der.begin() + first->content))
+            return out;
+        auto wrap = der_at(der, first->end);
+        if (!wrap || wrap->tag != 0xA0 || wrap->end > sd->end) return out;
+        sd = der_at(der, wrap->content);
+        if (!sd || sd->tag != 0x30 || sd->end > wrap->end) return out;
+    } else if (first->tag != 0x02) {
+        return out;  // a bare SignedData begins with its INTEGER version
+    }
+    // SignedData { version, digestAlgorithms, encapContentInfo,
+    //              certificates [0] IMPLICIT OPTIONAL, crls [1], signerInfos }
+    for (size_t i = sd->content; i < sd->end;) {
         auto node = der_at(der, i);
-        if (!node) break;
-        if (node->tag == 0xA0) {  // certificates [0] IMPLICIT
-            auto cert = der_at(der, node->content);
-            if (cert && cert->tag == 0x30)
-                return std::vector<uint8_t>(der.begin() + node->content, der.begin() + cert->end);
+        if (!node || node->end > sd->end) break;
+        if (node->tag == 0xA0) {
+            for (size_t j = node->content; j < node->end && out.size() < 256;) {
+                auto cert = der_at(der, j);
+                if (!cert || cert->end > node->end) break;
+                if (cert->tag == 0x30)  // a Certificate; other CHOICE arms are [n]
+                    out.emplace_back(der.begin() + j, der.begin() + cert->end);
+                j = cert->end;
+            }
             break;
         }
         i = node->end;
     }
-    return {};
+    return out;
 }
 
 std::vector<uint8_t> cert_from_any(std::span<const uint8_t> data) {
