@@ -1928,6 +1928,23 @@ static void test_keyweak() {
         CHECK(pks.size() == 1 && pks[0].algo == "RSA" && pks[0].e == 65537);
         CHECK(has_type(scan_keys("k.pub", sp), "roca-key"));
     }
+    // The same body under a non-key label is not a key: a DH PARAMETERS block is
+    // SEQ { INTEGER p, INTEGER g }, the RSAPublicKey shape.
+    {
+        const char* pem =
+            "-----BEGIN DH PARAMETERS-----\n"
+            "MAoCAwEAAQIDAQAB\n"
+            "-----END DH PARAMETERS-----\n";
+        std::span<const uint8_t> sp(reinterpret_cast<const uint8_t*>(pem), std::strlen(pem));
+        CHECK(extract_public_keys(sp).empty());
+    }
+    // Unlabeled (whole-file DER), the bare SEQ { 65537, 65537 } is no RSA key: a
+    // 17-bit modulus is the shape of a DER signature, not a key.
+    {
+        const uint8_t der[] = {0x30, 0x0A, 0x02, 0x03, 0x01, 0x00, 0x01,
+                               0x02, 0x03, 0x01, 0x00, 0x01};
+        CHECK(extract_public_keys(der).empty());
+    }
 }
 
 static void test_ecc() {

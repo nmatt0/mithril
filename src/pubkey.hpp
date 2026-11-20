@@ -57,7 +57,9 @@ struct PublicKey {
 
 // Recover every public key from one file's bytes. Text-anchored: PEM blocks
 // (CERTIFICATE / PUBLIC KEY / RSA PUBLIC KEY / PRIVATE KEY), OpenSSH public-key
-// lines, and — when the whole buffer is one — a bare DER certificate or SPKI.
+// lines, and — when the whole buffer is one — a bare DER certificate, SPKI or
+// RSA-plausible PKCS#1 key. Non-key blocks (DH / DSA PARAMETERS, SSL sessions,
+// signatures) share the RSAPublicKey shape but yield no key.
 std::vector<PublicKey> extract_public_keys(std::span<const uint8_t> data);
 
 }  // namespace ft
